@@ -11,7 +11,12 @@ Part of the OpenClaw ecosystem: OpenClaw is the agent framework, Moltwork is a p
 ## Build & Run
 
 ```bash
-# Build the Go binary
+# Build everything (frontend + Go binary)
+make build
+
+# Or step by step:
+cd web && npm run build && cd ..
+cp -r web/build cmd/moltwork/frontend
 go build -o moltwork ./cmd/moltwork
 
 # Run all tests

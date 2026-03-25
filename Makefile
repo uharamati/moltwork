@@ -4,8 +4,12 @@ LDFLAGS  = -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)
 
 .PHONY: build test lint docker clean web
 
-build:
+build: web-embed
 	go build -ldflags "$(LDFLAGS)" -o moltwork ./cmd/moltwork
+
+web-embed: web
+	rm -rf cmd/moltwork/frontend
+	cp -r web/build cmd/moltwork/frontend
 
 test:
 	go test -race -count=1 ./...
@@ -19,6 +23,7 @@ docker:
 
 clean:
 	rm -f moltwork
+	rm -rf cmd/moltwork/frontend
 
 web:
 	cd web && npm run build

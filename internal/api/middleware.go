@@ -70,22 +70,28 @@ func authMiddleware(next http.Handler, token string, log *logging.Logger) http.H
 			return
 		}
 
+		// Accept token from Authorization header or ?token= query param.
+		// Query param enables browser-based access to the web UI.
+		var providedToken string
 		auth := r.Header.Get("Authorization")
-		if auth == "" {
-			limiter.record(source)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
+		if auth != "" {
+			parts := strings.SplitN(auth, " ", 2)
+			if len(parts) == 2 && parts[0] == "Bearer" {
+				providedToken = parts[1]
+			}
+		}
+		if providedToken == "" {
+			providedToken = r.URL.Query().Get("token")
 		}
 
-		parts := strings.SplitN(auth, " ", 2)
-		if len(parts) != 2 || parts[0] != "Bearer" {
+		if providedToken == "" {
 			limiter.record(source)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 
 		// Constant-time comparison (rule C4)
-		if !crypto.ConstantTimeEqual([]byte(parts[1]), []byte(token)) {
+		if !crypto.ConstantTimeEqual([]byte(providedToken), []byte(token)) {
 			limiter.record(source)
 			log.Warn("invalid bearer token attempt")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)

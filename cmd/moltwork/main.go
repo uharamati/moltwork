@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"embed"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/signal"
 	"syscall"
@@ -17,6 +19,9 @@ import (
 	"moltwork/internal/logging"
 	"moltwork/internal/store"
 )
+
+//go:embed all:frontend
+var frontendFiles embed.FS
 
 var version = "dev"
 var commit = "unknown"
@@ -110,6 +115,14 @@ func runServer() {
 	if diagDB != nil {
 		srv.SetDiagDB(diagDB)
 	}
+	// Embed the frontend (built from web/ into cmd/moltwork/frontend/)
+	frontendFS, err := fs.Sub(frontendFiles, "frontend")
+	if err != nil {
+		log.Warn("frontend not available", map[string]any{"error": err.Error()})
+	} else {
+		srv.SetFrontend(frontendFS)
+	}
+
 	srv.Start()
 	defer srv.Close()
 

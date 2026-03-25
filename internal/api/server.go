@@ -21,11 +21,13 @@ type Server struct {
 	conn          *connector.Connector
 	log           *logging.Logger
 	server        *http.Server
+	mux           *http.ServeMux
 	token         string
 	listener      net.Listener
 	healthChecker *health.Checker
 	diagDB        *store.DiagDB
 	version       string
+	frontend      http.Handler
 }
 
 // SetVersion sets the version string for the status endpoint.
@@ -54,6 +56,7 @@ func NewServer(conn *connector.Connector, port int) (*Server, error) {
 	}
 
 	mux := http.NewServeMux()
+	s.mux = mux
 	s.registerRoutes(mux)
 	s.registerConnectorRoutes(mux)
 	s.registerDiagnosticsRoutes(mux)

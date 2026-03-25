@@ -25,6 +25,7 @@ web/node_modules/
 web/.svelte-kit/
 web/build/
 web/dist/
+cmd/moltwork/frontend/
 
 # IDE
 .idea/
