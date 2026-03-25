@@ -133,6 +133,11 @@ func bootstrap(c *Connector, platform, workspaceDomain string) error {
 		"agent_key": fmt.Sprintf("%x", c.keyPair.Public[:8]),
 	})
 
+	// Step 5: Post Slack announcements (channel setup + join announcement)
+	// are handled by the caller via AnnounceOwnJoinToSlack.
+	// Step 6: The rendezvous gossip address is posted by the caller
+	// via postRendezvousAddress after the gossip node is started.
+
 	return nil
 }
 

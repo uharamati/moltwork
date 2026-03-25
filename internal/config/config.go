@@ -29,6 +29,7 @@ type Config struct {
 	// Peer resilience
 	BootstrapPeers []string // multiaddr of bootstrap peers for cross-network discovery
 	MinPeers       int      // minimum peer connections before warning (default 3)
+	AdvertiseAddr  string   // explicit gossip advertise address for VPN/remote scenarios
 
 	// Diagnostics
 	DiagRetentionDays int  // days to retain diagnostic logs (default 7)

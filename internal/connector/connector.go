@@ -17,6 +17,7 @@ import (
 	"moltwork/internal/gossip"
 	"moltwork/internal/identity"
 	"moltwork/internal/logging"
+	"moltwork/internal/rendezvous"
 	"moltwork/internal/store"
 )
 
@@ -160,6 +161,9 @@ func (c *Connector) Start(ctx context.Context) error {
 		defer c.wg.Done()
 		c.startPairwiseRotation(c.ctx)
 	}()
+
+	// Start watching for join requests from new agents (welcoming agent role)
+	c.startJoinRequestWatcher()
 
 	// Start attestation loop if platform token exists (rule P3)
 	token, platform, _, _ := c.keyDB.GetPlatformToken()
@@ -496,6 +500,34 @@ func (c *Connector) GetTrustBoundary() (platform, domain string, err error) {
 	}
 
 	return tb.Platform, tb.WorkspaceDomain, nil
+}
+
+// startJoinRequestWatcher launches a background goroutine that watches the
+// #moltwork-agents Slack channel for join requests from new agents. When a
+// request is found, this agent acts as the welcoming agent — distributing the
+// PSK and posting the join announcement.
+func (c *Connector) startJoinRequestWatcher() {
+	token, platform, _, err := c.keyDB.GetPlatformToken()
+	if err != nil || token == nil || platform != "slack" {
+		c.log.Info("no slack token available, join request watcher not started")
+		return
+	}
+
+	rv := rendezvous.NewSlackProvider(string(token), c.log)
+
+	// Check if the channel exists before starting the watcher
+	exists, err := rv.WorkspaceExists(c.ctx)
+	if err != nil || !exists {
+		c.log.Info("rendezvous channel not found, join request watcher not started")
+		return
+	}
+
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.watchJoinRequests(c.ctx, rv)
+	}()
+	c.log.Info("join request watcher started")
 }
 
 // Close shuts down all subsystems.
