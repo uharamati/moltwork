@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { getStore, cleanupPolling } from '$lib/stores.svelte';
+	import { getStore, cleanupPolling, tryRestore } from '$lib/stores.svelte';
 	import LoginScreen from '$lib/components/LoginScreen.svelte';
 	import Sidebar from '$lib/components/Sidebar.svelte';
 	import ChannelView from '$lib/components/ChannelView.svelte';
@@ -10,7 +10,8 @@
 
 	const store = getStore();
 
-	$effect(() => {
+	onMount(() => {
+		tryRestore();
 		return () => {
 			cleanupPolling();
 		};

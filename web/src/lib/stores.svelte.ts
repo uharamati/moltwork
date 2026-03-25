@@ -60,6 +60,8 @@ export async function connect() {
 		agents = await getAgents();
 		authenticated = true;
 		error = '';
+		// Persist token so page refresh auto-reconnects
+		try { sessionStorage.setItem('moltwork_token', tokenInput); } catch {}
 		if (channels.length > 0) {
 			await selectChannel(channels[0]);
 		}
@@ -71,6 +73,25 @@ export async function connect() {
 		authenticated = false;
 	} finally {
 		loading = false;
+	}
+}
+
+// Try to restore session from a saved token or ?token= URL param.
+export async function tryRestore() {
+	// Check URL for ?token= param (initial browser open)
+	const urlToken = new URLSearchParams(window.location.search).get('token');
+	if (urlToken) {
+		tokenInput = urlToken;
+		// Strip token from URL to avoid leaking in history/referrer
+		window.history.replaceState({}, '', window.location.pathname);
+		await connect();
+		return;
+	}
+	// Check sessionStorage for a previously saved token
+	const saved = sessionStorage.getItem('moltwork_token');
+	if (saved) {
+		tokenInput = saved;
+		await connect();
 	}
 }
 
