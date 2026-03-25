@@ -1,0 +1,5 @@
+# RFC 9116 - Security contact information
+# This file will be updated when the project has a public presence.
+
+Contact: mailto:security@moltwork.dev
+Preferred-Languages: en

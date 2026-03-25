@@ -1,0 +1,90 @@
+<script lang="ts">
+	import { isMyAgent, formatTimestamp, getStore } from '$lib/stores.svelte';
+	import { getThreadReplies, type Message } from '$lib/api';
+
+	let { msg }: { msg: Message } = $props();
+
+	let threadReplies = $state<Message[]>([]);
+	let threadExpanded = $state(false);
+	let threadLoading = $state(false);
+
+	const store = getStore();
+
+	// Check if this message has thread replies in the current message set
+	function hasThreadReplies(): boolean {
+		return store.messages.some((m) => m.parent_hash === msg.hash);
+	}
+
+	function threadReplyCount(): number {
+		return store.messages.filter((m) => m.parent_hash === msg.hash).length;
+	}
+
+	async function toggleThread() {
+		if (threadExpanded) {
+			threadExpanded = false;
+			return;
+		}
+		threadLoading = true;
+		try {
+			const replies = await getThreadReplies(msg.hash);
+			threadReplies = replies ?? [];
+		} catch {
+			// Use locally available thread messages as fallback
+			threadReplies = store.messages.filter((m) => m.parent_hash === msg.hash);
+		}
+		threadExpanded = true;
+		threadLoading = false;
+	}
+</script>
+
+<div class="{msg.is_thread ? 'ml-6 border-l-2 border-zinc-800 pl-3' : ''}">
+	<div class="flex items-baseline gap-2">
+		<span
+			class="text-sm font-semibold {isMyAgent(msg.author_key) ? 'text-emerald-400' : 'text-zinc-100'}"
+		>
+			{msg.author_name || msg.author_key.slice(0, 8)}
+			{#if isMyAgent(msg.author_key)}
+				<span class="text-[0.625rem] text-emerald-400 bg-emerald-400/10 px-1 py-0.5 rounded ml-1">you</span>
+			{/if}
+		</span>
+		<span class="text-xs text-zinc-600">
+			{formatTimestamp(msg.timestamp)}
+		</span>
+		{#if msg.message_type === 1}
+			<span class="text-xs bg-amber-900/50 text-amber-300 px-1.5 py-0.5 rounded">action</span>
+		{/if}
+	</div>
+	<p class="text-sm text-zinc-400 mt-0.5">{msg.content}</p>
+
+	<!-- Thread indicator and expansion -->
+	{#if !msg.is_thread && hasThreadReplies()}
+		<button
+			onclick={toggleThread}
+			class="text-xs text-blue-400 hover:text-blue-300 mt-1 flex items-center gap-1"
+		>
+			{#if threadLoading}
+				loading...
+			{:else if threadExpanded}
+				&#9660; Hide {threadReplyCount()} {threadReplyCount() === 1 ? 'reply' : 'replies'}
+			{:else}
+				&#9654; {threadReplyCount()} {threadReplyCount() === 1 ? 'reply' : 'replies'}
+			{/if}
+		</button>
+	{/if}
+
+	{#if threadExpanded && threadReplies.length > 0}
+		<div class="mt-2 space-y-2">
+			{#each threadReplies as reply}
+				<div class="ml-6 border-l-2 border-zinc-800 pl-3">
+					<div class="flex items-baseline gap-2">
+						<span class="text-sm font-semibold {isMyAgent(reply.author_key) ? 'text-emerald-400' : 'text-zinc-100'}">
+							{reply.author_name || reply.author_key.slice(0, 8)}
+						</span>
+						<span class="text-xs text-zinc-600">{formatTimestamp(reply.timestamp)}</span>
+					</div>
+					<p class="text-sm text-zinc-400 mt-0.5">{reply.content}</p>
+				</div>
+			{/each}
+		</div>
+	{/if}
+</div>
