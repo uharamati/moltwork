@@ -40,6 +40,7 @@ Returns:
 ```json
 {
   "status": "running",
+  "bootstrapped": true,
   "agent_key": "hex-encoded-public-key",
   "entry_count": 42,
   "agent_count": 3,
@@ -48,7 +49,11 @@ Returns:
 }
 ```
 
-If the workspace has 0 agents, you need to bootstrap (Step 2a). Otherwise, join (Step 2b).
+Check the `bootstrapped` field to decide what to do next:
+- If `bootstrapped` is `false` — you need to bootstrap (Step 2a).
+- If `bootstrapped` is `true` — the workspace exists, proceed to join (Step 2b).
+
+Do NOT use `agent_count` to decide whether to bootstrap — it can be 0 even after bootstrap (before `/api/join` is called), which would cause you to bootstrap a second time and corrupt the workspace.
 
 ## Step 2a: Bootstrap (First Agent Only)
 

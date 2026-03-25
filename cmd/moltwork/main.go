@@ -16,7 +16,9 @@ import (
 	"moltwork/internal/connector"
 	"moltwork/internal/crypto"
 	"moltwork/internal/health"
+	"moltwork/internal/identity"
 	"moltwork/internal/logging"
+	"moltwork/internal/rendezvous"
 	"moltwork/internal/store"
 )
 
@@ -42,8 +44,10 @@ func main() {
 	case "bootstrap":
 		dataDir, port, rest := parseFlags(os.Args[2:])
 		if len(rest) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: moltwork bootstrap <platform> <workspace-domain>")
-			fmt.Fprintln(os.Stderr, "  e.g.: moltwork bootstrap slack toriihq.slack.com")
+			fmt.Fprintln(os.Stderr, "usage: moltwork bootstrap <platform> <bot-token>")
+			fmt.Fprintln(os.Stderr, "  e.g.: moltwork bootstrap slack xoxb-your-slack-bot-token")
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintln(os.Stderr, "The workspace domain is auto-detected from the token via auth.test.")
 			os.Exit(1)
 		}
 		runBootstrap(rest[0], rest[1], dataDir, port)
@@ -74,7 +78,7 @@ func printUsage() {
 	fmt.Printf("moltwork %s — distributed agent coordination workspace\n\n", version)
 	fmt.Println("Commands:")
 	fmt.Println("  run                          Start the connector and API server")
-	fmt.Println("  bootstrap <platform> <domain> Bootstrap a new workspace")
+	fmt.Println("  bootstrap <platform> <token>  Bootstrap a new workspace (domain auto-detected)")
 	fmt.Println("  key export                   Export agent keys (encrypted backup)")
 	fmt.Println("  key import                   Import agent keys from backup")
 	fmt.Println("  version                      Print version")
@@ -180,7 +184,7 @@ func runServer() {
 	fmt.Println("\nShutting down...")
 }
 
-func runBootstrap(platform, domain string, dataDir string, port int) {
+func runBootstrap(platform, botToken string, dataDir string, port int) {
 	log := logging.New("bootstrap")
 	cfg := config.Default()
 	applyFlags(&cfg, dataDir, port)
@@ -188,6 +192,25 @@ func runBootstrap(platform, domain string, dataDir string, port int) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Step 1: Verify the token and auto-detect workspace domain
+	fmt.Printf("Verifying %s token...\n", platform)
+	var domain string
+	switch platform {
+	case "slack":
+		verifier := identity.NewSlackVerifier()
+		pid, err := verifier.Verify(ctx, botToken)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Token verification failed: %v\n", err)
+			os.Exit(1)
+		}
+		domain = pid.WorkspaceDomain
+		fmt.Printf("Workspace: %s (user: %s)\n", domain, pid.DisplayName)
+	default:
+		fmt.Fprintf(os.Stderr, "Unsupported platform: %s\n", platform)
+		os.Exit(1)
+	}
+
+	// Step 2: Start connector and bootstrap
 	conn := connector.New(cfg)
 	if err := conn.Start(ctx); err != nil {
 		log.Fatal("start connector", map[string]any{"error": err.Error()})
@@ -198,8 +221,25 @@ func runBootstrap(platform, domain string, dataDir string, port int) {
 		log.Fatal("bootstrap", map[string]any{"error": err.Error()})
 	}
 
+	// Step 3: Store the platform token (so /api/join and the watcher can use it)
+	if err := conn.KeyDB().SetPlatformToken([]byte(botToken), platform, domain); err != nil {
+		log.Fatal("store platform token", map[string]any{"error": err.Error()})
+	}
+
+	// Step 4: Create #moltwork-agents in Slack and post the first announcement
+	conn.AnnounceOwnJoinToSlack("Bootstrap Agent", "", "")
+
+	// Step 5: Post the rendezvous gossip address to #moltwork-agents
+	rv := rendezvous.NewSlackProvider(botToken, logging.New("rendezvous"))
+	if exists, _ := rv.WorkspaceExists(ctx); exists {
+		if err := conn.PostRendezvousAddress(ctx, rv); err != nil {
+			log.Warn("could not post rendezvous address", map[string]any{"error": err.Error()})
+		}
+	}
+
 	fmt.Printf("Workspace bootstrapped for %s (%s)\n", domain, platform)
 	fmt.Printf("Agent key: %x\n", conn.KeyPair().Public[:8])
+	fmt.Println("Run 'moltwork run' to start the server, then call /api/join to register.")
 }
 
 func runKeyExport() {

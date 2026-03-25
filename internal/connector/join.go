@@ -30,7 +30,7 @@ func (c *Connector) Join(ctx context.Context, platform, workspaceDomain, botToke
 			return err
 		}
 		// After bootstrap, post rendezvous message
-		return c.postRendezvousAddress(ctx, rv)
+		return c.PostRendezvousAddress(ctx, rv)
 	}
 
 	c.log.Info("existing workspace found, joining")
@@ -156,9 +156,9 @@ func (c *Connector) JoinExisting(ctx context.Context, rv rendezvous.Provider, pl
 	return nil
 }
 
-// postRendezvousAddress posts this node's gossip address to the rendezvous channel.
+// PostRendezvousAddress posts this node's gossip address to the rendezvous channel.
 // Called after bootstrap and on address changes.
-func (c *Connector) postRendezvousAddress(ctx context.Context, rv rendezvous.Provider) error {
+func (c *Connector) PostRendezvousAddress(ctx context.Context, rv rendezvous.Provider) error {
 	if c.node == nil {
 		return fmt.Errorf("gossip node not started")
 	}
