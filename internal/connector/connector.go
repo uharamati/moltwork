@@ -141,6 +141,7 @@ func (c *Connector) Start(ctx context.Context) error {
 		GossipRateLimit: c.cfg.GossipRateLimit,
 		SyncInterval:    10 * time.Second,
 		Validator:       c.registry,
+		BootstrapPeers:  c.cfg.BootstrapPeers,
 	})
 	if err != nil {
 		c.Close()

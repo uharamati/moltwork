@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"time"
@@ -42,15 +43,15 @@ func main() {
 		runServer()
 
 	case "bootstrap":
-		dataDir, port, rest := parseFlags(os.Args[2:])
-		if len(rest) < 2 {
+		f := parseFlags(os.Args[2:])
+		if len(f.rest) < 2 {
 			fmt.Fprintln(os.Stderr, "usage: moltwork bootstrap <platform> <bot-token>")
 			fmt.Fprintln(os.Stderr, "  e.g.: moltwork bootstrap slack xoxb-your-slack-bot-token")
 			fmt.Fprintln(os.Stderr, "")
 			fmt.Fprintln(os.Stderr, "The workspace domain is auto-detected from the token via auth.test.")
 			os.Exit(1)
 		}
-		runBootstrap(rest[0], rest[1], dataDir, port)
+		runBootstrap(f.rest[0], f.rest[1], f)
 
 	case "key":
 		if len(os.Args) < 3 {
@@ -86,44 +87,66 @@ func printUsage() {
 	fmt.Println("Flags (for run and bootstrap):")
 	fmt.Println("  --data-dir <path>            Data directory (default: ~/.moltwork)")
 	fmt.Println("  --port <number>              API server port (default: 9700)")
+	fmt.Println("  --bootstrap-peers <addrs>    Comma-separated multiaddrs for peer discovery")
 }
 
-// parseFlags extracts --data-dir and --port from args (after the subcommand).
-// Returns the remaining args with flags stripped.
-func parseFlags(args []string) (dataDir string, port int, rest []string) {
+// parsedFlags holds CLI flags parsed from args.
+type parsedFlags struct {
+	dataDir        string
+	port           int
+	bootstrapPeers []string
+	rest           []string
+}
+
+// parseFlags extracts --data-dir, --port, and --bootstrap-peers from args.
+func parseFlags(args []string) parsedFlags {
+	var f parsedFlags
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--data-dir":
 			if i+1 < len(args) {
-				dataDir = args[i+1]
+				f.dataDir = args[i+1]
 				i++
 			}
 		case "--port":
 			if i+1 < len(args) {
-				fmt.Sscanf(args[i+1], "%d", &port)
+				fmt.Sscanf(args[i+1], "%d", &f.port)
+				i++
+			}
+		case "--bootstrap-peers":
+			if i+1 < len(args) {
+				// Comma-separated list of multiaddrs.
+				for _, p := range strings.Split(args[i+1], ",") {
+					if p = strings.TrimSpace(p); p != "" {
+						f.bootstrapPeers = append(f.bootstrapPeers, p)
+					}
+				}
 				i++
 			}
 		default:
-			rest = append(rest, args[i])
+			f.rest = append(f.rest, args[i])
 		}
 	}
-	return
+	return f
 }
 
-func applyFlags(cfg *config.Config, dataDir string, port int) {
-	if dataDir != "" {
-		cfg.DataDir = dataDir
+func applyFlags(cfg *config.Config, f parsedFlags) {
+	if f.dataDir != "" {
+		cfg.DataDir = f.dataDir
 	}
-	if port != 0 {
-		cfg.WebUIPort = port
+	if f.port != 0 {
+		cfg.WebUIPort = f.port
+	}
+	if len(f.bootstrapPeers) > 0 {
+		cfg.BootstrapPeers = append(cfg.BootstrapPeers, f.bootstrapPeers...)
 	}
 }
 
 func runServer() {
 	log := logging.New("main")
 	cfg := config.Default()
-	dataDir, port, _ := parseFlags(os.Args[2:])
-	applyFlags(&cfg, dataDir, port)
+	f := parseFlags(os.Args[2:])
+	applyFlags(&cfg, f)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -184,10 +207,10 @@ func runServer() {
 	fmt.Println("\nShutting down...")
 }
 
-func runBootstrap(platform, botToken string, dataDir string, port int) {
+func runBootstrap(platform, botToken string, f parsedFlags) {
 	log := logging.New("bootstrap")
 	cfg := config.Default()
-	applyFlags(&cfg, dataDir, port)
+	applyFlags(&cfg, f)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -245,8 +268,8 @@ func runBootstrap(platform, botToken string, dataDir string, port int) {
 func runKeyExport() {
 	log := logging.New("key-export")
 	cfg := config.Default()
-	dataDir, _, rest := parseFlags(os.Args[3:])
-	applyFlags(&cfg, dataDir, 0)
+	f := parseFlags(os.Args[3:])
+	applyFlags(&cfg, f)
 
 	keyDB, err := store.OpenKeyDB(cfg.KeyDBPath())
 	if err != nil {
@@ -286,8 +309,8 @@ func runKeyExport() {
 	}
 
 	outputPath := "moltwork-key-backup.bin"
-	if len(rest) > 0 {
-		outputPath = rest[0]
+	if len(f.rest) > 0 {
+		outputPath = f.rest[0]
 	}
 
 	if err := crypto.WriteKeyFile(outputPath, backup); err != nil {
@@ -301,12 +324,12 @@ func runKeyExport() {
 func runKeyImport() {
 	log := logging.New("key-import")
 	cfg := config.Default()
-	dataDir, _, rest := parseFlags(os.Args[3:])
-	applyFlags(&cfg, dataDir, 0)
+	f := parseFlags(os.Args[3:])
+	applyFlags(&cfg, f)
 
 	inputPath := "moltwork-key-backup.bin"
-	if len(rest) > 0 {
-		inputPath = rest[0]
+	if len(f.rest) > 0 {
+		inputPath = f.rest[0]
 	}
 
 	data, err := crypto.ReadKeyFile(inputPath)
