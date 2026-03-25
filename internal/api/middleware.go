@@ -57,11 +57,26 @@ type contextKey string
 
 const correlationIDKey contextKey = "correlation_id"
 
+const sessionCookieName = "moltwork_session"
+
 // authMiddleware validates the bearer token (rule N2, F4).
 func authMiddleware(next http.Handler, token string, log *logging.Logger) http.Handler {
 	limiter := newAuthRateLimiter(10, time.Minute)
 
+	// Derive a session cookie value from the token so it's not the raw token
+	// but still verifiable. HMAC(token, "session") would be ideal but for a
+	// localhost-only server, a hex-encoded hash is sufficient.
+	h := crypto.Hash([]byte(token))
+	sessionValue := hex.EncodeToString(h[:])
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Static assets don't need auth — they're just JS/CSS/fonts.
+		// The HTML and API calls are what carry sensitive data.
+		if strings.HasPrefix(r.URL.Path, "/_app/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		source := r.RemoteAddr
 
 		// Check rate limit before processing
@@ -70,8 +85,7 @@ func authMiddleware(next http.Handler, token string, log *logging.Logger) http.H
 			return
 		}
 
-		// Accept token from Authorization header or ?token= query param.
-		// Query param enables browser-based access to the web UI.
+		// Check auth sources in order: header, cookie, query param.
 		var providedToken string
 		auth := r.Header.Get("Authorization")
 		if auth != "" {
@@ -80,6 +94,18 @@ func authMiddleware(next http.Handler, token string, log *logging.Logger) http.H
 				providedToken = parts[1]
 			}
 		}
+
+		// Check session cookie (set after successful ?token= auth)
+		if providedToken == "" {
+			if c, err := r.Cookie(sessionCookieName); err == nil {
+				if crypto.ConstantTimeEqual([]byte(c.Value), []byte(sessionValue)) {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+		}
+
+		// Check ?token= query param (browser initial load)
 		if providedToken == "" {
 			providedToken = r.URL.Query().Get("token")
 		}
@@ -96,6 +122,18 @@ func authMiddleware(next http.Handler, token string, log *logging.Logger) http.H
 			log.Warn("invalid bearer token attempt")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
+		}
+
+		// On successful ?token= auth, set a session cookie so subsequent
+		// requests (asset loads, API fetches) don't need the query param.
+		if r.URL.Query().Get("token") != "" {
+			http.SetCookie(w, &http.Cookie{
+				Name:     sessionCookieName,
+				Value:    sessionValue,
+				Path:     "/",
+				HttpOnly: true,
+				SameSite: http.SameSiteStrictMode,
+			})
 		}
 
 		next.ServeHTTP(w, r)
