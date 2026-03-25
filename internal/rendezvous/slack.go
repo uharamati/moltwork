@@ -270,43 +270,61 @@ type slackMessage struct {
 	User string `json:"user"`
 }
 
-// findChannel searches for the #moltwork-agents channel.
+// findChannel searches for the #moltwork-agents channel, paginating through
+// all public channels until found or all pages are exhausted.
 func (s *SlackProvider) findChannel(ctx context.Context) (string, error) {
 	client := &http.Client{Timeout: apiTimeout}
+	cursor := ""
 
-	req, err := http.NewRequestWithContext(ctx, "GET",
-		"https://slack.com/api/conversations.list?types=public_channel&limit=200", nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+s.token)
+	for {
+		url := "https://slack.com/api/conversations.list?types=public_channel&limit=200"
+		if cursor != "" {
+			url += "&cursor=" + cursor
+		}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("rendezvous.channel.check_failed: %w", err)
-	}
-	defer resp.Body.Close()
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Authorization", "Bearer "+s.token)
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	var result struct {
-		OK       bool `json:"ok"`
-		Channels []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"channels"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", err
-	}
-	if !result.OK {
-		return "", fmt.Errorf("slack API returned not OK")
-	}
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("rendezvous.channel.check_failed: %w", err)
+		}
 
-	for _, ch := range result.Channels {
-		if ch.Name == channelName {
-			return ch.ID, nil
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+
+		var result struct {
+			OK       bool `json:"ok"`
+			Channels []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"channels"`
+			ResponseMetadata struct {
+				NextCursor string `json:"next_cursor"`
+			} `json:"response_metadata"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			return "", err
+		}
+		if !result.OK {
+			return "", fmt.Errorf("slack API returned not OK")
+		}
+
+		for _, ch := range result.Channels {
+			if ch.Name == channelName {
+				return ch.ID, nil
+			}
+		}
+
+		cursor = result.ResponseMetadata.NextCursor
+		if cursor == "" {
+			break
 		}
 	}
+
 	return "", nil
 }
 
