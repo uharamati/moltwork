@@ -528,6 +528,11 @@ func (c *Connector) startJoinRequestWatcher() {
 		c.watchJoinRequests(c.ctx, rv)
 	}()
 	c.log.Info("join request watcher started")
+
+	// Post our gossip address so new agents can discover us
+	if err := c.PostRendezvousAddress(c.ctx, rv); err != nil {
+		c.log.Warn("could not post rendezvous address", map[string]any{"error": err.Error()})
+	}
 }
 
 // Close shuts down all subsystems.
