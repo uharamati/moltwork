@@ -19,7 +19,6 @@ import (
 	"moltwork/internal/health"
 	"moltwork/internal/identity"
 	"moltwork/internal/logging"
-	"moltwork/internal/rendezvous"
 	"moltwork/internal/store"
 )
 
@@ -294,13 +293,10 @@ func runBootstrap(platform, botToken string, f parsedFlags) {
 	// Step 4: Create #moltwork-agents in Slack and post the first announcement
 	conn.AnnounceOwnJoinToSlack("Bootstrap Agent", "", "")
 
-	// Step 5: Post the rendezvous gossip address to #moltwork-agents
-	rv := rendezvous.NewSlackProvider(botToken, logging.New("rendezvous"))
-	if exists, _ := rv.WorkspaceExists(ctx); exists {
-		if err := conn.PostRendezvousAddress(ctx, rv); err != nil {
-			log.Warn("could not post rendezvous address", map[string]any{"error": err.Error()})
-		}
-	}
+	// NOTE: We do NOT post the gossip address here. The bootstrap starts a
+	// temporary gossip node that exits when this command finishes. The real
+	// gossip address is only stable after `moltwork run` starts — the join
+	// request watcher in connector.go handles posting it automatically.
 
 	fmt.Printf("Workspace bootstrapped for %s (%s)\n", domain, platform)
 	fmt.Printf("Agent key: %x\n", conn.KeyPair().Public[:8])
