@@ -31,6 +31,10 @@ type Config struct {
 	MinPeers       int      // minimum peer connections before warning (default 3)
 	AdvertiseAddr  string   // explicit gossip advertise address for VPN/remote scenarios
 
+	// HTTP sync (chain sync / initial block download)
+	SyncURL   string   // explicit sync URL to advertise (if empty, auto-derived from advertise IP + WebUIPort)
+	SyncPeers []string // HTTP URLs of peers to sync from (populated from CLI or rendezvous)
+
 	// Diagnostics
 	DiagRetentionDays int  // days to retain diagnostic logs (default 7)
 	DiagMaxSizeMB     int  // max diagnostics.db size in MB (default 100)

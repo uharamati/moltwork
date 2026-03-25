@@ -197,7 +197,7 @@ func HandleIncomingSync(s network.Stream, logDB *store.LogDB, psk []byte, valida
 			log.Warn("decode entries", map[string]any{"error": err.Error()})
 			return
 		}
-		storeEntries(logDB, incoming.Entries, validator, log)
+		StoreEntries(logDB, incoming.Entries, validator, log)
 	}
 
 	writeMsg(s, MsgTypeDone, nil)
@@ -253,7 +253,7 @@ func InitiateSync(s network.Stream, logDB *store.LogDB, psk []byte, validator Ag
 		if err := moltcbor.Unmarshal(payload, &incoming); err != nil {
 			return fmt.Errorf("decode entries: %w", err)
 		}
-		storeEntries(logDB, incoming.Entries, validator, log)
+		StoreEntries(logDB, incoming.Entries, validator, log)
 	}
 
 	// Step 5: Send entries they need
@@ -355,9 +355,9 @@ func authenticateIncoming(s network.Stream, psk []byte) error {
 	return writeMsg(s, MsgTypePSKProof, data)
 }
 
-// storeEntries validates and stores received entries.
+// StoreEntries validates and stores received entries.
 // Entries are sorted so revocations are processed first (rule R1).
-func storeEntries(logDB *store.LogDB, entries []RawSyncEntry, validator AgentValidator, log *logging.Logger) {
+func StoreEntries(logDB *store.LogDB, entries []RawSyncEntry, validator AgentValidator, log *logging.Logger) {
 	// Sort revocation entries to front (rule R1)
 	sortRevocationsFirst(entries)
 

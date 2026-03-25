@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"moltwork/internal/crypto"
@@ -104,6 +105,44 @@ func (c *Connector) JoinExisting(ctx context.Context, rv rendezvous.Provider, pl
 		return fmt.Errorf("no gossip addresses found in rendezvous channel")
 	}
 
+	// Step 6.5: Attempt HTTP chain sync from any peer with a sync_url.
+	// This is like a blockchain initial block download — pull the full log
+	// over HTTP before starting gossip, so we have all data immediately.
+	synced := false
+	for _, addr := range addrs {
+		if addr.SyncURL == "" {
+			continue
+		}
+		c.log.Info("attempting HTTP chain sync", map[string]any{"url": addr.SyncURL})
+		if err := c.httpChainSync(addr.SyncURL, psk); err != nil {
+			c.log.Warn("HTTP chain sync failed, will try next peer or fall back to gossip", map[string]any{
+				"url":   addr.SyncURL,
+				"error": err.Error(),
+			})
+			continue
+		}
+		synced = true
+		c.log.Info("HTTP chain sync completed successfully", map[string]any{"url": addr.SyncURL})
+		break // one successful sync is enough — every peer has the full log
+	}
+
+	// Also try any sync peers from config (e.g., --sync-peers CLI flag)
+	if !synced {
+		for _, peer := range c.cfg.SyncPeers {
+			c.log.Info("attempting HTTP chain sync from configured peer", map[string]any{"url": peer})
+			if err := c.httpChainSync(peer, psk); err != nil {
+				c.log.Warn("HTTP chain sync from configured peer failed", map[string]any{
+					"url":   peer,
+					"error": err.Error(),
+				})
+				continue
+			}
+			synced = true
+			c.log.Info("HTTP chain sync from configured peer succeeded", map[string]any{"url": peer})
+			break
+		}
+	}
+
 	// Step 7: Inject peers into tracker (rule SR6: validate before connecting)
 	for _, addr := range addrs {
 		if addr.Multiaddr == "" || addr.PeerID == "" {
@@ -169,9 +208,16 @@ func (c *Connector) PostRendezvousAddress(ctx context.Context, rv rendezvous.Pro
 		return nil
 	}
 
+	// Derive sync URL: explicit config > auto-detect from advertise IP + web UI port
+	syncURL := c.cfg.SyncURL
+	if syncURL == "" {
+		syncURL = c.determineSyncURL(advertiseAddr)
+	}
+
 	addr := rendezvous.GossipAddress{
 		PeerID:    c.node.Host().ID().String(),
 		Multiaddr: advertiseAddr,
+		SyncURL:   syncURL,
 		PublicKey:  c.keyPair.Public,
 		Timestamp: time.Now().Unix(),
 	}
@@ -240,6 +286,20 @@ func (c *Connector) determineAdvertiseAddr() string {
 		}
 	}
 
+	return ""
+}
+
+// determineSyncURL derives the HTTP sync URL from the advertise multiaddr and web UI port.
+func (c *Connector) determineSyncURL(advertiseAddr string) string {
+	// Extract the IP from the multiaddr (format: /ip4/X.X.X.X/tcp/XXXXX)
+	// We just need the IP part — the sync URL uses the web UI port, not the gossip port.
+	parts := strings.Split(advertiseAddr, "/")
+	for i, p := range parts {
+		if p == "ip4" && i+1 < len(parts) {
+			ip := parts[i+1]
+			return fmt.Sprintf("http://%s:%d", ip, c.cfg.WebUIPort)
+		}
+	}
 	return ""
 }
 

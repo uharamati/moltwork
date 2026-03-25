@@ -41,7 +41,8 @@ type Connector struct {
 	attestLoop *identity.AttestationLoop
 	diagDB     *store.DiagDB
 
-	pairwiseMu sync.Mutex // protects EstablishPairwiseSecrets
+	pairwiseMu   sync.Mutex // protects EstablishPairwiseSecrets
+	syncPeerURLs []string   // HTTP sync peer URLs (from config + rendezvous)
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -165,6 +166,10 @@ func (c *Connector) Start(ctx context.Context) error {
 
 	// Start watching for join requests from new agents (welcoming agent role)
 	c.startJoinRequestWatcher()
+
+	// Initialize sync peer URLs from config and start background HTTP sync
+	c.syncPeerURLs = append(c.syncPeerURLs, c.cfg.SyncPeers...)
+	c.startHTTPSyncLoop(c.ctx)
 
 	// Start attestation loop if platform token exists (rule P3)
 	token, platform, _, _ := c.keyDB.GetPlatformToken()
@@ -356,6 +361,15 @@ func (c *Connector) DiagDB() *store.DiagDB {
 // SetDiagDB sets the diagnostics database.
 func (c *Connector) SetDiagDB(db *store.DiagDB) {
 	c.diagDB = db
+}
+
+// GetPSK returns the workspace PSK, or nil if not yet set.
+func (c *Connector) GetPSK() []byte {
+	psk, err := c.keyDB.GetPSK()
+	if err != nil || psk == nil {
+		return nil
+	}
+	return psk
 }
 
 // WebUITokenPath returns the path to the web UI bearer token file.

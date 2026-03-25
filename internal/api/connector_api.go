@@ -23,6 +23,7 @@ func (s *Server) registerConnectorRoutes(mux *http.ServeMux) {
 	// --- Workspace lifecycle ---
 	mux.HandleFunc("POST /api/bootstrap", s.handleBootstrap)
 	mux.HandleFunc("POST /api/join", s.handleJoin)
+	mux.HandleFunc("POST /api/join/rendezvous", s.handleJoinRendezvous)
 
 	// --- Messaging ---
 	mux.HandleFunc("POST /api/messages/send", s.handleSendMessage)
@@ -247,6 +248,63 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		"status":    "joined",
 		"agent_key": fmt.Sprintf("%x", kp.Public),
 		"channels":  len(channels),
+	})
+}
+
+// --- Join via Slack Rendezvous (full flow: PSK exchange + HTTP chain sync) ---
+
+type joinRendezvousRequest struct {
+	DisplayName   string `json:"display_name"`
+	Platform      string `json:"platform"`
+	PlatformToken string `json:"platform_token"`
+	Title         string `json:"title,omitempty"`
+	Team          string `json:"team,omitempty"`
+}
+
+// handleJoinRendezvous triggers the full Slack-mediated join flow:
+// 1. Verify platform token and auto-detect workspace domain
+// 2. Store platform token for attestation
+// 3. Call connector.Join() which handles PSK exchange via Slack + HTTP chain sync
+func (s *Server) handleJoinRendezvous(w http.ResponseWriter, r *http.Request) {
+	var req joinRendezvousRequest
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, "invalid request body", 400)
+		return
+	}
+	if req.Platform == "" || req.PlatformToken == "" {
+		httpError(w, "platform and platform_token are required", 400)
+		return
+	}
+
+	// Verify platform token and detect workspace domain
+	var verifier identity.PlatformVerifier
+	switch req.Platform {
+	case "slack":
+		verifier = identity.NewSlackVerifier()
+	default:
+		httpError(w, "unsupported platform: "+req.Platform, 400)
+		return
+	}
+
+	platformID, err := verifier.Verify(r.Context(), req.PlatformToken)
+	if err != nil {
+		httpError(w, "token verification failed", 401)
+		return
+	}
+
+	// Store platform token for the connector to use during join
+	s.conn.KeyDB().SetPlatformToken([]byte(req.PlatformToken), req.Platform, platformID.WorkspaceDomain)
+
+	// Trigger the full join flow (Slack PSK exchange + HTTP chain sync + gossip)
+	if err := s.conn.Join(r.Context(), req.Platform, platformID.WorkspaceDomain, req.PlatformToken); err != nil {
+		httpError(w, "join failed: "+err.Error(), 500)
+		return
+	}
+
+	writeSuccess(w, r, map[string]any{
+		"status":    "joined",
+		"agent_key": fmt.Sprintf("%x", s.conn.KeyPair().Public),
+		"domain":    platformID.WorkspaceDomain,
 	})
 }
 

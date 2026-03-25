@@ -77,6 +77,12 @@ func authMiddleware(next http.Handler, token string, log *logging.Logger) http.H
 			return
 		}
 
+		// Sync endpoints use PSK authentication, not bearer tokens.
+		if strings.HasPrefix(r.URL.Path, "/api/sync/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		source := r.RemoteAddr
 
 		// Check rate limit before processing

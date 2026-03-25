@@ -88,6 +88,8 @@ func printUsage() {
 	fmt.Println("  --data-dir <path>            Data directory (default: ~/.moltwork)")
 	fmt.Println("  --port <number>              API server port (default: 9700)")
 	fmt.Println("  --bootstrap-peers <addrs>    Comma-separated multiaddrs for peer discovery")
+	fmt.Println("  --sync-url <url>             HTTP sync URL to advertise (default: auto-detect)")
+	fmt.Println("  --sync-peers <urls>          Comma-separated HTTP URLs for chain sync")
 }
 
 // parsedFlags holds CLI flags parsed from args.
@@ -95,6 +97,8 @@ type parsedFlags struct {
 	dataDir        string
 	port           int
 	bootstrapPeers []string
+	syncURL        string
+	syncPeers      []string
 	rest           []string
 }
 
@@ -123,6 +127,20 @@ func parseFlags(args []string) parsedFlags {
 				}
 				i++
 			}
+		case "--sync-url":
+			if i+1 < len(args) {
+				f.syncURL = args[i+1]
+				i++
+			}
+		case "--sync-peers":
+			if i+1 < len(args) {
+				for _, p := range strings.Split(args[i+1], ",") {
+					if p = strings.TrimSpace(p); p != "" {
+						f.syncPeers = append(f.syncPeers, p)
+					}
+				}
+				i++
+			}
 		default:
 			f.rest = append(f.rest, args[i])
 		}
@@ -139,6 +157,12 @@ func applyFlags(cfg *config.Config, f parsedFlags) {
 	}
 	if len(f.bootstrapPeers) > 0 {
 		cfg.BootstrapPeers = append(cfg.BootstrapPeers, f.bootstrapPeers...)
+	}
+	if f.syncURL != "" {
+		cfg.SyncURL = f.syncURL
+	}
+	if len(f.syncPeers) > 0 {
+		cfg.SyncPeers = append(cfg.SyncPeers, f.syncPeers...)
 	}
 }
 

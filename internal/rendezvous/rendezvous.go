@@ -63,10 +63,11 @@ type Provider interface {
 // GossipAddress is a node's advertised gossip endpoint, posted to the
 // rendezvous channel so new agents know where to connect.
 type GossipAddress struct {
-	PeerID    string `json:"peer_id"`   // libp2p peer ID (base58)
-	Multiaddr string `json:"multiaddr"` // e.g. "/ip4/192.168.1.5/tcp/4001"
-	PublicKey []byte `json:"pubkey"`    // Ed25519 public key (base64 in JSON)
-	Timestamp int64  `json:"ts"`        // unix timestamp
+	PeerID    string `json:"peer_id"`            // libp2p peer ID (base58)
+	Multiaddr string `json:"multiaddr"`          // e.g. "/ip4/192.168.1.5/tcp/4001"
+	SyncURL   string `json:"sync_url,omitempty"` // HTTP sync endpoint, e.g. "http://192.168.1.5:9700"
+	PublicKey []byte `json:"pubkey"`             // Ed25519 public key (base64 in JSON)
+	Timestamp int64  `json:"ts"`                 // unix timestamp
 }
 
 // JoinRequest is posted by a new agent seeking to join the workspace.

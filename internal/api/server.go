@@ -28,6 +28,8 @@ type Server struct {
 	diagDB        *store.DiagDB
 	version       string
 	frontend      http.Handler
+	syncSessions  *syncSessionStore
+	syncLimiter   *authRateLimiter
 }
 
 // SetVersion sets the version string for the status endpoint.
@@ -50,15 +52,18 @@ func NewServer(conn *connector.Connector, port int) (*Server, error) {
 	log := logging.New("api")
 
 	s := &Server{
-		conn:  conn,
-		log:   log,
-		token: token,
+		conn:         conn,
+		log:          log,
+		token:        token,
+		syncSessions: newSyncSessionStore(),
+		syncLimiter:  newAuthRateLimiter(5, time.Minute),
 	}
 
 	mux := http.NewServeMux()
 	s.mux = mux
 	s.registerRoutes(mux)
 	s.registerConnectorRoutes(mux)
+	s.registerSyncRoutes(mux)
 	s.registerDiagnosticsRoutes(mux)
 
 	// Bind to 127.0.0.1 only (rule N1)

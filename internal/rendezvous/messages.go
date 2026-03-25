@@ -20,6 +20,7 @@ type gossipAddrJSON struct {
 	Type      string `json:"type"`
 	PeerID    string `json:"peer_id"`
 	Multiaddr string `json:"multiaddr"`
+	SyncURL   string `json:"sync_url,omitempty"`
 	PubKey    string `json:"pubkey"` // base64
 	Timestamp int64  `json:"ts"`
 }
@@ -54,6 +55,7 @@ func FormatGossipAddress(agentName string, addr GossipAddress) string {
 		Type:      "gossip_addr",
 		PeerID:    addr.PeerID,
 		Multiaddr: addr.Multiaddr,
+		SyncURL:   addr.SyncURL,
 		PubKey:    base64.StdEncoding.EncodeToString(addr.PublicKey),
 		Timestamp: addr.Timestamp,
 	}
@@ -123,6 +125,7 @@ func ParseGossipAddress(text string) *GossipAddress {
 	return &GossipAddress{
 		PeerID:    data.PeerID,
 		Multiaddr: data.Multiaddr,
+		SyncURL:   data.SyncURL,
 		PublicKey:  pubKey,
 		Timestamp: data.Timestamp,
 	}

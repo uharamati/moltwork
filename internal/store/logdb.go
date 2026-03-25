@@ -212,6 +212,32 @@ func (s *LogDB) AllHashes() ([][]byte, error) {
 	return hashes, rows.Err()
 }
 
+// AllEntries returns all entries in the log with their parent hashes.
+func (s *LogDB) AllEntries() ([]*RawEntry, error) {
+	rows, err := s.db.Query(
+		"SELECT hash, raw_cbor, author_key, signature, entry_type, created_at FROM entries ORDER BY created_at",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("all entries: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []*RawEntry
+	for rows.Next() {
+		var e RawEntry
+		if err := rows.Scan(&e.Hash, &e.RawCBOR, &e.AuthorKey, &e.Signature, &e.EntryType, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan entry: %w", err)
+		}
+		parents, err := s.GetParents(e.Hash)
+		if err != nil {
+			return nil, err
+		}
+		e.Parents = parents
+		entries = append(entries, &e)
+	}
+	return entries, rows.Err()
+}
+
 // EntriesByType returns all entries of a given type.
 func (s *LogDB) EntriesByType(entryType int) ([]*RawEntry, error) {
 	rows, err := s.db.Query(
