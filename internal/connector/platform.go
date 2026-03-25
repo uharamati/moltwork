@@ -12,18 +12,17 @@ import (
 // slackChannelName is the Slack channel where join announcements are posted.
 const slackChannelName = "moltwork-agents"
 
-// AnnounceJoinToSlack posts a join announcement to the #moltwork-agents channel
-// in the company's Slack workspace (onboarding steps 13-14).
-// If the channel doesn't exist and the bot has permission, it creates it.
-func (c *Connector) AnnounceJoinToSlack(displayName, title, team string) {
+// AnnounceOwnJoinToSlack posts a join announcement for this agent (the bootstrap agent)
+// to the #moltwork-agents channel. Only used during workspace bootstrap — the first agent
+// posts its own announcement because its bot is already in the channel.
+func (c *Connector) AnnounceOwnJoinToSlack(displayName, title, team string) {
 	token, platform, _, err := c.keyDB.GetPlatformToken()
 	if err != nil || token == nil || platform != "slack" {
-		return // No Slack token or not Slack platform
+		return
 	}
 
 	botToken := string(token)
 
-	// Step 13: Check if #moltwork-agents exists
 	channelID, err := c.slackFindChannel(botToken, slackChannelName)
 	if err != nil {
 		c.log.Warn("slack channel check failed", map[string]any{
@@ -39,15 +38,62 @@ func (c *Connector) AnnounceJoinToSlack(displayName, title, team string) {
 				"channel": slackChannelName,
 				"error":   err.Error(),
 			})
-			// Not fatal — channel creation is best-effort
 		}
 	}
 
 	if channelID == "" {
-		return // Can't find or create the channel
+		return
 	}
 
-	// Step 14: Post join announcement
+	announcement := formatJoinAnnouncement(displayName, title, team)
+	if err := c.slackPostMessage(botToken, channelID, announcement); err != nil {
+		c.log.Warn("slack announcement failed", map[string]any{
+			"error": err.Error(),
+		})
+	} else {
+		c.log.Info("posted own join announcement to slack", map[string]any{
+			"channel": slackChannelName,
+		})
+	}
+}
+
+// RelayJoinToSlack posts a join announcement on behalf of another agent.
+// Called by the welcoming agent (existing agent that handles PSK distribution)
+// when a new agent joins. The welcoming agent uses its own Slack bot token,
+// which is already present in the #moltwork-agents channel.
+func (c *Connector) RelayJoinToSlack(newAgentName, newAgentTitle, newAgentTeam string) {
+	token, platform, _, err := c.keyDB.GetPlatformToken()
+	if err != nil || token == nil || platform != "slack" {
+		c.log.Warn("cannot relay join announcement: no slack token available")
+		return
+	}
+
+	botToken := string(token)
+
+	channelID, err := c.slackFindChannel(botToken, slackChannelName)
+	if err != nil || channelID == "" {
+		c.log.Warn("cannot relay join announcement: channel not found", map[string]any{
+			"channel": slackChannelName,
+			"error":   fmt.Sprintf("%v", err),
+		})
+		return
+	}
+
+	announcement := formatJoinAnnouncement(newAgentName, newAgentTitle, newAgentTeam)
+	if err := c.slackPostMessage(botToken, channelID, announcement); err != nil {
+		c.log.Warn("slack relay announcement failed", map[string]any{
+			"error": err.Error(),
+		})
+	} else {
+		c.log.Info("relayed join announcement to slack", map[string]any{
+			"channel":   slackChannelName,
+			"new_agent": newAgentName,
+		})
+	}
+}
+
+// formatJoinAnnouncement builds the Slack announcement text for a joining agent.
+func formatJoinAnnouncement(displayName, title, team string) string {
 	announcement := fmt.Sprintf("*%s* has joined the Moltwork workspace", displayName)
 	if title != "" {
 		announcement += fmt.Sprintf(" (%s", title)
@@ -56,16 +102,7 @@ func (c *Connector) AnnounceJoinToSlack(displayName, title, team string) {
 		}
 		announcement += ")"
 	}
-
-	if err := c.slackPostMessage(botToken, channelID, announcement); err != nil {
-		c.log.Warn("slack announcement failed", map[string]any{
-			"error": err.Error(),
-		})
-	} else {
-		c.log.Info("posted join announcement to slack", map[string]any{
-			"channel": slackChannelName,
-		})
-	}
+	return announcement
 }
 
 // slackFindChannel searches for a channel by name using conversations.list.

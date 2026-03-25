@@ -84,6 +84,11 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bootstrap agent posts its own join announcement to Slack #moltwork-agents.
+	// This is the only agent whose bot is added to the channel — all future
+	// join announcements are relayed through this bot by the welcoming agent.
+	go s.conn.AnnounceOwnJoinToSlack("Bootstrap Agent", "", "")
+
 	writeSuccess(w, r, map[string]any{
 		"status":    "bootstrapped",
 		"agent_key": fmt.Sprintf("%x", s.conn.KeyPair().Public),
@@ -234,7 +239,9 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Post join announcement to Slack #moltwork-agents (onboarding steps 13-14)
-	go s.conn.AnnounceJoinToSlack(req.DisplayName, req.Title, req.Team)
+	// The welcoming agent (this node) relays the announcement on behalf of the new agent,
+	// using its own Slack bot token which is already in the #moltwork-agents channel.
+	go s.conn.RelayJoinToSlack(req.DisplayName, req.Title, req.Team)
 
 	writeSuccess(w, r, map[string]any{
 		"status":    "joined",
