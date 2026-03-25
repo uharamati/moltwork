@@ -19,7 +19,10 @@ async function fetchAPI<T>(path: string): Promise<T> {
 	if (data === null || data === undefined) {
 		throw new Error(`API returned null for ${path}`);
 	}
-	return data as T;
+	if (!data.ok) {
+		throw new Error(data.error?.human_message || `API error for ${path}`);
+	}
+	return data.result as T;
 }
 
 export interface Status {
