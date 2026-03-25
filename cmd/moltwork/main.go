@@ -40,12 +40,13 @@ func main() {
 		runServer()
 
 	case "bootstrap":
-		if len(os.Args) < 4 {
+		dataDir, port, rest := parseFlags(os.Args[2:])
+		if len(rest) < 2 {
 			fmt.Fprintln(os.Stderr, "usage: moltwork bootstrap <platform> <workspace-domain>")
 			fmt.Fprintln(os.Stderr, "  e.g.: moltwork bootstrap slack toriihq.slack.com")
 			os.Exit(1)
 		}
-		runBootstrap(os.Args[2], os.Args[3])
+		runBootstrap(rest[0], rest[1], dataDir, port)
 
 	case "key":
 		if len(os.Args) < 3 {
@@ -77,11 +78,48 @@ func printUsage() {
 	fmt.Println("  key export                   Export agent keys (encrypted backup)")
 	fmt.Println("  key import                   Import agent keys from backup")
 	fmt.Println("  version                      Print version")
+	fmt.Println()
+	fmt.Println("Flags (for run and bootstrap):")
+	fmt.Println("  --data-dir <path>            Data directory (default: ~/.moltwork)")
+	fmt.Println("  --port <number>              API server port (default: 9700)")
+}
+
+// parseFlags extracts --data-dir and --port from args (after the subcommand).
+// Returns the remaining args with flags stripped.
+func parseFlags(args []string) (dataDir string, port int, rest []string) {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--data-dir":
+			if i+1 < len(args) {
+				dataDir = args[i+1]
+				i++
+			}
+		case "--port":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &port)
+				i++
+			}
+		default:
+			rest = append(rest, args[i])
+		}
+	}
+	return
+}
+
+func applyFlags(cfg *config.Config, dataDir string, port int) {
+	if dataDir != "" {
+		cfg.DataDir = dataDir
+	}
+	if port != 0 {
+		cfg.WebUIPort = port
+	}
 }
 
 func runServer() {
 	log := logging.New("main")
 	cfg := config.Default()
+	dataDir, port, _ := parseFlags(os.Args[2:])
+	applyFlags(&cfg, dataDir, port)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -142,9 +180,10 @@ func runServer() {
 	fmt.Println("\nShutting down...")
 }
 
-func runBootstrap(platform, domain string) {
+func runBootstrap(platform, domain string, dataDir string, port int) {
 	log := logging.New("bootstrap")
 	cfg := config.Default()
+	applyFlags(&cfg, dataDir, port)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -166,6 +205,8 @@ func runBootstrap(platform, domain string) {
 func runKeyExport() {
 	log := logging.New("key-export")
 	cfg := config.Default()
+	dataDir, _, rest := parseFlags(os.Args[3:])
+	applyFlags(&cfg, dataDir, 0)
 
 	keyDB, err := store.OpenKeyDB(cfg.KeyDBPath())
 	if err != nil {
@@ -205,8 +246,8 @@ func runKeyExport() {
 	}
 
 	outputPath := "moltwork-key-backup.bin"
-	if len(os.Args) > 3 {
-		outputPath = os.Args[3]
+	if len(rest) > 0 {
+		outputPath = rest[0]
 	}
 
 	if err := crypto.WriteKeyFile(outputPath, backup); err != nil {
@@ -220,10 +261,12 @@ func runKeyExport() {
 func runKeyImport() {
 	log := logging.New("key-import")
 	cfg := config.Default()
+	dataDir, _, rest := parseFlags(os.Args[3:])
+	applyFlags(&cfg, dataDir, 0)
 
 	inputPath := "moltwork-key-backup.bin"
-	if len(os.Args) > 3 {
-		inputPath = os.Args[3]
+	if len(rest) > 0 {
+		inputPath = rest[0]
 	}
 
 	data, err := crypto.ReadKeyFile(inputPath)
