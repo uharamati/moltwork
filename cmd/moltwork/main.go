@@ -88,6 +88,7 @@ func printUsage() {
 	fmt.Println("  --data-dir <path>            Data directory (default: ~/.moltwork)")
 	fmt.Println("  --port <number>              API server port (default: 9700)")
 	fmt.Println("  --bootstrap-peers <addrs>    Comma-separated multiaddrs for peer discovery")
+	fmt.Println("  --public-port <number>       Public port for sync endpoints on 0.0.0.0 (default: disabled)")
 	fmt.Println("  --sync-url <url>             HTTP sync URL to advertise (default: auto-detect)")
 	fmt.Println("  --sync-peers <urls>          Comma-separated HTTP URLs for chain sync")
 }
@@ -96,6 +97,7 @@ func printUsage() {
 type parsedFlags struct {
 	dataDir        string
 	port           int
+	publicPort     int
 	bootstrapPeers []string
 	syncURL        string
 	syncPeers      []string
@@ -125,6 +127,11 @@ func parseFlags(args []string) parsedFlags {
 						f.bootstrapPeers = append(f.bootstrapPeers, p)
 					}
 				}
+				i++
+			}
+		case "--public-port":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &f.publicPort)
 				i++
 			}
 		case "--sync-url":
@@ -157,6 +164,9 @@ func applyFlags(cfg *config.Config, f parsedFlags) {
 	}
 	if len(f.bootstrapPeers) > 0 {
 		cfg.BootstrapPeers = append(cfg.BootstrapPeers, f.bootstrapPeers...)
+	}
+	if f.publicPort != 0 {
+		cfg.PublicPort = f.publicPort
 	}
 	if f.syncURL != "" {
 		cfg.SyncURL = f.syncURL
@@ -214,6 +224,14 @@ func runServer() {
 
 	srv.Start()
 	defer srv.Close()
+
+	// Start public sync server if configured
+	if cfg.PublicPort > 0 {
+		if err := srv.StartPublicSync(cfg.PublicPort); err != nil {
+			log.Fatal("start public sync server", map[string]any{"error": err.Error()})
+		}
+		fmt.Printf("Public sync server on 0.0.0.0:%d\n", cfg.PublicPort)
+	}
 
 	log.Info("moltwork running", map[string]any{
 		"api":     srv.Addr(),

@@ -289,15 +289,20 @@ func (c *Connector) determineAdvertiseAddr() string {
 	return ""
 }
 
-// determineSyncURL derives the HTTP sync URL from the advertise multiaddr and web UI port.
+// determineSyncURL derives the HTTP sync URL from the advertise multiaddr and port config.
+// Uses PublicPort if set (the port bound on 0.0.0.0), otherwise falls back to WebUIPort.
 func (c *Connector) determineSyncURL(advertiseAddr string) string {
+	port := c.cfg.WebUIPort
+	if c.cfg.PublicPort > 0 {
+		port = c.cfg.PublicPort
+	}
+
 	// Extract the IP from the multiaddr (format: /ip4/X.X.X.X/tcp/XXXXX)
-	// We just need the IP part — the sync URL uses the web UI port, not the gossip port.
 	parts := strings.Split(advertiseAddr, "/")
 	for i, p := range parts {
 		if p == "ip4" && i+1 < len(parts) {
 			ip := parts[i+1]
-			return fmt.Sprintf("http://%s:%d", ip, c.cfg.WebUIPort)
+			return fmt.Sprintf("http://%s:%d", ip, port)
 		}
 	}
 	return ""

@@ -32,8 +32,9 @@ type Config struct {
 	AdvertiseAddr  string   // explicit gossip advertise address for VPN/remote scenarios
 
 	// HTTP sync (chain sync / initial block download)
-	SyncURL   string   // explicit sync URL to advertise (if empty, auto-derived from advertise IP + WebUIPort)
-	SyncPeers []string // HTTP URLs of peers to sync from (populated from CLI or rendezvous)
+	SyncURL    string   // explicit sync URL to advertise (if empty, auto-derived from advertise IP + port)
+	SyncPeers  []string // HTTP URLs of peers to sync from (populated from CLI or rendezvous)
+	PublicPort int      // public-facing port for sync endpoints on 0.0.0.0 (default 0 = disabled)
 
 	// Diagnostics
 	DiagRetentionDays int  // days to retain diagnostic logs (default 7)

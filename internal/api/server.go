@@ -18,18 +18,20 @@ import (
 
 // Server is the HTTP API for the web UI and OpenClaw connector.
 type Server struct {
-	conn          *connector.Connector
-	log           *logging.Logger
-	server        *http.Server
-	mux           *http.ServeMux
-	token         string
-	listener      net.Listener
-	healthChecker *health.Checker
-	diagDB        *store.DiagDB
-	version       string
-	frontend      http.Handler
-	syncSessions  *syncSessionStore
-	syncLimiter   *authRateLimiter
+	conn           *connector.Connector
+	log            *logging.Logger
+	server         *http.Server
+	mux            *http.ServeMux
+	token          string
+	listener       net.Listener
+	healthChecker  *health.Checker
+	diagDB         *store.DiagDB
+	version        string
+	frontend       http.Handler
+	syncSessions   *syncSessionStore
+	syncLimiter    *authRateLimiter
+	publicServer   *http.Server
+	publicListener net.Listener
 }
 
 // SetVersion sets the version string for the status endpoint.
@@ -129,9 +131,43 @@ func (s *Server) registerDiagnosticsRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/diagnostics/bundle", s.handleDiagnosticsBundle)
 }
 
+// StartPublicSync starts a second HTTP server on 0.0.0.0:{port} that only
+// serves the /api/sync/* endpoints. This allows external agents to reach
+// the sync endpoints while the main API stays on localhost.
+func (s *Server) StartPublicSync(port int) error {
+	mux := http.NewServeMux()
+	s.registerSyncRoutes(mux)
+
+	bindAddr := fmt.Sprintf("0.0.0.0:%d", port)
+	listener, err := net.Listen("tcp", bindAddr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", bindAddr, err)
+	}
+	s.publicListener = listener
+
+	s.publicServer = &http.Server{
+		Handler:      correlationMiddleware(mux),
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 30 * time.Second,
+	}
+
+	go func() {
+		s.log.Info("public sync server started", map[string]any{
+			"address": listener.Addr().String(),
+		})
+		if err := s.publicServer.Serve(listener); err != nil && err != http.ErrServerClosed {
+			s.log.Error("public sync server error", map[string]any{"error": err.Error()})
+		}
+	}()
+	return nil
+}
+
 // Close gracefully shuts down the server.
 func (s *Server) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	if s.publicServer != nil {
+		s.publicServer.Shutdown(ctx)
+	}
 	return s.server.Shutdown(ctx)
 }
