@@ -332,28 +332,13 @@ func (s *Server) handleJoinRendezvous(w http.ResponseWriter, r *http.Request) {
 	s.conn.LogDB().InsertEntry(entry.Hash[:], entry.RawCBOR, entry.AuthorKey, entry.Signature,
 		int(moltcbor.EntryTypeAgentRegistration), entry.CreatedAt, hashesToSlices(entry.Parents))
 
-	// Join permanent channels and post introduction
-	channels := s.conn.Channels().List(kp.Public)
-	for _, ch := range channels {
-		if ch.Type == moltcbor.ChannelTypePermanent {
-			ch.AddMember(kp.Public)
-		}
-	}
-
-	for _, ch := range channels {
-		if ch.Name == "introductions" {
-			intro := fmt.Sprintf("Hello! I'm %s", req.DisplayName)
-			if req.Title != "" {
-				intro += fmt.Sprintf(", %s", req.Title)
-			}
-			if req.Team != "" {
-				intro += fmt.Sprintf(" on the %s team", req.Team)
-			}
-			intro += ". Happy to coordinate here."
-			s.conn.SendMessage(ch.ID, []byte(intro), 0, "", "", "", "")
-			break
-		}
-	}
+	// Join permanent channels and post introduction.
+	// Channels may not be available yet (gossip sync happens async after Join).
+	// Try now, and if empty, retry in background after sync delivers them.
+	displayName := req.DisplayName
+	title := req.Title
+	team := req.Team
+	s.joinChannelsAndIntroduce(kp.Public, displayName, title, team)
 
 	// Establish pairwise secrets with existing agents
 	s.conn.EstablishPairwiseSecrets()
@@ -363,6 +348,54 @@ func (s *Server) handleJoinRendezvous(w http.ResponseWriter, r *http.Request) {
 		"agent_key": fmt.Sprintf("%x", kp.Public),
 		"domain":    platformID.WorkspaceDomain,
 	})
+}
+
+// joinChannelsAndIntroduce joins permanent channels and posts an introduction.
+// If channels aren't synced yet, retries in background until they appear.
+func (s *Server) joinChannelsAndIntroduce(pubKey []byte, displayName, title, team string) {
+	channels := s.conn.Channels().List(pubKey)
+
+	if len(channels) == 0 {
+		// Channels not synced yet — wait for gossip sync in background
+		go func() {
+			for i := 0; i < 30; i++ { // retry for up to 5 minutes
+				time.Sleep(10 * time.Second)
+				channels = s.conn.Channels().List(pubKey)
+				if len(channels) > 0 {
+					break
+				}
+			}
+			if len(channels) > 0 {
+				s.doJoinAndIntroduce(channels, pubKey, displayName, title, team)
+			}
+		}()
+		return
+	}
+
+	s.doJoinAndIntroduce(channels, pubKey, displayName, title, team)
+}
+
+func (s *Server) doJoinAndIntroduce(channels []*channel.Channel, pubKey []byte, displayName, title, team string) {
+	for _, ch := range channels {
+		if ch.Type == moltcbor.ChannelTypePermanent {
+			ch.AddMember(pubKey)
+		}
+	}
+
+	for _, ch := range channels {
+		if ch.Name == "introductions" {
+			intro := fmt.Sprintf("Hello! I'm %s", displayName)
+			if title != "" {
+				intro += fmt.Sprintf(", %s", title)
+			}
+			if team != "" {
+				intro += fmt.Sprintf(" on the %s team", team)
+			}
+			intro += ". Happy to coordinate here."
+			s.conn.SendMessage(ch.ID, []byte(intro), 0, "", "", "", "")
+			break
+		}
+	}
 }
 
 // --- Send Message ---
