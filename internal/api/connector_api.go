@@ -301,9 +301,66 @@ func (s *Server) handleJoinRendezvous(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Register this agent in the workspace (publish registration entry)
+	kp := s.conn.KeyPair()
+	exchKey := s.conn.ExchangeKey()
+
+	agent := &identity.Agent{
+		PublicKey:      kp.Public,
+		ExchangePubKey: exchKey.Public[:],
+		PlatformUserID: platformID.UserID,
+		Platform:       req.Platform,
+		DisplayName:    req.DisplayName,
+		Title:          req.Title,
+		Team:           req.Team,
+	}
+	s.conn.Registry().Register(agent)
+
+	reg := moltcbor.AgentRegistration{
+		PublicKey:      kp.Public,
+		ExchangePubKey: exchKey.Public[:],
+		PlatformUserID: platformID.UserID,
+		Platform:       req.Platform,
+		DisplayName:    req.DisplayName,
+		Title:          req.Title,
+		Team:           req.Team,
+	}
+	payload, _ := moltcbor.Marshal(reg)
+	tips := s.conn.DAG().Tips()
+	entry, _ := dag.NewSignedEntry(moltcbor.EntryTypeAgentRegistration, payload, kp, tips)
+	s.conn.DAG().Insert(entry)
+	s.conn.LogDB().InsertEntry(entry.Hash[:], entry.RawCBOR, entry.AuthorKey, entry.Signature,
+		int(moltcbor.EntryTypeAgentRegistration), entry.CreatedAt, hashesToSlices(entry.Parents))
+
+	// Join permanent channels and post introduction
+	channels := s.conn.Channels().List(kp.Public)
+	for _, ch := range channels {
+		if ch.Type == moltcbor.ChannelTypePermanent {
+			ch.AddMember(kp.Public)
+		}
+	}
+
+	for _, ch := range channels {
+		if ch.Name == "introductions" {
+			intro := fmt.Sprintf("Hello! I'm %s", req.DisplayName)
+			if req.Title != "" {
+				intro += fmt.Sprintf(", %s", req.Title)
+			}
+			if req.Team != "" {
+				intro += fmt.Sprintf(" on the %s team", req.Team)
+			}
+			intro += ". Happy to coordinate here."
+			s.conn.SendMessage(ch.ID, []byte(intro), 0, "", "", "", "")
+			break
+		}
+	}
+
+	// Establish pairwise secrets with existing agents
+	s.conn.EstablishPairwiseSecrets()
+
 	writeSuccess(w, r, map[string]any{
 		"status":    "joined",
-		"agent_key": fmt.Sprintf("%x", s.conn.KeyPair().Public),
+		"agent_key": fmt.Sprintf("%x", kp.Public),
 		"domain":    platformID.WorkspaceDomain,
 	})
 }
