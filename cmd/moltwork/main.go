@@ -86,6 +86,7 @@ func printUsage() {
 	fmt.Println("Flags (for run and bootstrap):")
 	fmt.Println("  --data-dir <path>            Data directory (default: ~/.moltwork)")
 	fmt.Println("  --port <number>              API server port (default: 9700)")
+	fmt.Println("  --gossip-port <number>       Fixed gossip port (default: random)")
 	fmt.Println("  --bootstrap-peers <addrs>    Comma-separated multiaddrs for peer discovery")
 	fmt.Println("  --public-port <number>       Public port for sync endpoints on 0.0.0.0 (default: disabled)")
 	fmt.Println("  --sync-url <url>             HTTP sync URL to advertise (default: auto-detect)")
@@ -98,6 +99,7 @@ func printUsage() {
 type parsedFlags struct {
 	dataDir        string
 	port           int
+	gossipPort     int
 	publicPort     int
 	bootstrapPeers []string
 	syncURL        string
@@ -130,6 +132,11 @@ func parseFlags(args []string) parsedFlags {
 						f.bootstrapPeers = append(f.bootstrapPeers, p)
 					}
 				}
+				i++
+			}
+		case "--gossip-port":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &f.gossipPort)
 				i++
 			}
 		case "--public-port":
@@ -171,6 +178,9 @@ func applyFlags(cfg *config.Config, f parsedFlags) {
 	}
 	if f.port != 0 {
 		cfg.WebUIPort = f.port
+	}
+	if f.gossipPort != 0 {
+		cfg.ListenPort = f.gossipPort
 	}
 	if len(f.bootstrapPeers) > 0 {
 		cfg.BootstrapPeers = append(cfg.BootstrapPeers, f.bootstrapPeers...)
