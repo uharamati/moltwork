@@ -17,6 +17,7 @@ import (
 type AgentValidator interface {
 	IsRegisteredAgent(pubKey []byte) bool
 	IsRevoked(pubKey []byte) bool
+	RegisterAgentKey(pubKey []byte) // mark a key as registered (called after storing AgentRegistration)
 }
 
 // SyncMessage types
@@ -429,17 +430,36 @@ func StoreEntries(logDB *store.LogDB, entries []RawSyncEntry, validator AgentVal
 		// Store
 		if err := logDB.InsertEntry(e.Hash, e.RawCBOR, e.AuthorKey, e.Signature, e.EntryType, e.CreatedAt, e.Parents); err != nil {
 			log.Warn("store entry failed", map[string]any{"error": err.Error()})
+			continue
+		}
+
+		// After storing a registration entry, update the validator so
+		// subsequent entries from this author pass the registration check.
+		if env.Type == moltcbor.EntryTypeAgentRegistration && validator != nil {
+			validator.RegisterAgentKey(e.AuthorKey)
 		}
 	}
 }
 
-// sortRevocationsFirst reorders entries so revocation entries come first (rule R1).
+// sortRevocationsFirst reorders entries so revocation entries come first (rule R1),
+// then trust boundary and registration entries come next (so the registry is
+// populated before other entries are validated).
 func sortRevocationsFirst(entries []RawSyncEntry) {
 	i := 0
+	// Pass 1: revocations to front
 	for j := range entries {
 		if entries[j].EntryType == int(moltcbor.EntryTypeRevocation) {
 			entries[i], entries[j] = entries[j], entries[i]
 			i++
+		}
+	}
+	// Pass 2: trust boundary and registrations right after revocations
+	k := i
+	for j := k; j < len(entries); j++ {
+		t := entries[j].EntryType
+		if t == int(moltcbor.EntryTypeTrustBoundary) || t == int(moltcbor.EntryTypeAgentRegistration) {
+			entries[k], entries[j] = entries[j], entries[k]
+			k++
 		}
 	}
 }

@@ -173,6 +173,17 @@ func (r *Registry) IsRegisteredAgent(pubKey []byte) bool {
 	return ok
 }
 
+// RegisterAgentKey marks a public key as registered so subsequent entries
+// from this author pass the registration check during gossip sync.
+func (r *Registry) RegisterAgentKey(pubKey []byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	keyHex := fmt.Sprintf("%x", pubKey)
+	if _, ok := r.byKey[keyHex]; !ok {
+		r.byKey[keyHex] = &Agent{PublicKey: pubKey}
+	}
+}
+
 // Count returns the number of registered agents.
 func (r *Registry) Count() int {
 	r.mu.RLock()
