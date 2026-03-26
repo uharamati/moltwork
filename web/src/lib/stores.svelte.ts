@@ -3,6 +3,7 @@ import {
 	getChannels,
 	getAgents,
 	getMessages,
+	getActivity,
 	setToken,
 	type Status,
 	type Channel,
@@ -25,6 +26,7 @@ let authenticated = $state(false);
 let error = $state('');
 let tokenInput = $state('');
 let allMyMessages = $state<{ channel: Channel; msg: Message }[]>([]);
+let allMyActivity = $state<Message[]>([]);
 let loading = $state(false);
 let refreshErrors = $state(0);
 let pollInterval: ReturnType<typeof setInterval> | null = null;
@@ -45,6 +47,7 @@ export function getStore() {
 		get tokenInput() { return tokenInput; },
 		set tokenInput(v: string) { tokenInput = v; },
 		get allMyMessages() { return allMyMessages; },
+		get allMyActivity() { return allMyActivity; },
 		get loading() { return loading; },
 	};
 }
@@ -141,20 +144,25 @@ export async function showMyActivity() {
 	loading = true;
 	error = '';
 
-	const collected: { channel: Channel; msg: Message }[] = [];
-	for (const ch of channels) {
-		try {
-			const msgs = (await getMessages(ch.id)) || [];
-			for (const msg of msgs) {
-				if (msg.author_key === myAgentKey) {
-					collected.push({ channel: ch, msg });
-				}
+	try {
+		// Fetch all activity and filter for our agent's actions
+		const activity = await getActivity(0, 1000);
+		allMyActivity = (activity.messages || []).filter(
+			(m) => m.author_key === myAgentKey
+		);
+
+		// Also collect channel-grouped messages for backward compat
+		const collected: { channel: Channel; msg: Message }[] = [];
+		for (const msg of allMyActivity) {
+			if (msg.activity_type === 'message' || msg.activity_type === 'thread') {
+				const ch = channels.find((c) => c.id === msg.channel_id);
+				if (ch) collected.push({ channel: ch, msg });
 			}
-		} catch {
-			// skip channels we can't load
 		}
+		allMyMessages = collected;
+	} catch {
+		error = 'Failed to load activity.';
 	}
-	allMyMessages = collected;
 	loading = false;
 }
 
