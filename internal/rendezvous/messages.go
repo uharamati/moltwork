@@ -122,10 +122,14 @@ func ParseGossipAddress(text string) *GossipAddress {
 		return nil
 	}
 
+	// Slack auto-links URLs, wrapping them in <> (e.g. <http://...>).
+	// Strip the angle brackets so the URL is usable.
+	syncURL := strings.TrimPrefix(strings.TrimSuffix(data.SyncURL, ">"), "<")
+
 	return &GossipAddress{
 		PeerID:    data.PeerID,
 		Multiaddr: data.Multiaddr,
-		SyncURL:   data.SyncURL,
+		SyncURL:   syncURL,
 		PublicKey:  pubKey,
 		Timestamp: data.Timestamp,
 	}

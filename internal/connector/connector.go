@@ -150,6 +150,13 @@ func (c *Connector) Start(ctx context.Context) error {
 		return fmt.Errorf("start gossip: %w", err)
 	}
 
+	// Rebuild in-memory state when new entries arrive via gossip
+	c.node.SetOnSyncComplete(func() {
+		c.registry.LoadFromDB(c.logDB)
+		c.replayChannelState()
+		c.replayOrgRelationships()
+	})
+
 	c.startedAt = time.Now()
 
 	c.log.Info("connector started", map[string]any{

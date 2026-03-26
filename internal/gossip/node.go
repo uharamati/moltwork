@@ -33,6 +33,8 @@ type Node struct {
 	peerSyncMu sync.Mutex
 	activePeers map[peer.ID]bool
 
+	onSyncComplete func() // called after entries are received via gossip
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -98,6 +100,9 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 	// Register sync protocol handler
 	h.SetStreamHandler(protocol.ID(ProtocolID), func(s network.Stream) {
 		HandleIncomingSync(s, cfg.LogDB, cfg.PSK, n.validator, cfg.Logger)
+		if n.onSyncComplete != nil {
+			n.onSyncComplete()
+		}
 	})
 
 	// Start mDNS discovery
@@ -216,6 +221,11 @@ func (n *Node) syncWithPeers() {
 	n.syncMu.Lock()
 	n.lastSyncTime = time.Now()
 	n.syncMu.Unlock()
+
+	// Notify the connector to rebuild in-memory state from new entries
+	if n.onSyncComplete != nil {
+		n.onSyncComplete()
+	}
 }
 
 // Host returns the underlying libp2p host.
@@ -233,6 +243,12 @@ func (n *Node) LastSyncTime() time.Time {
 	n.syncMu.RLock()
 	defer n.syncMu.RUnlock()
 	return n.lastSyncTime
+}
+
+// SetOnSyncComplete sets a callback invoked after entries are received via gossip.
+// The connector uses this to rebuild in-memory state (registry, channels, etc.)
+func (n *Node) SetOnSyncComplete(fn func()) {
+	n.onSyncComplete = fn
 }
 
 // UpdatePSK atomically swaps the PSK used for gossip authentication.
