@@ -115,15 +115,21 @@ export async function loadMessages(ch: Channel) {
 }
 
 export async function refreshMessages() {
-	if (currentView === 'channel' && selectedChannel) {
-		try {
+	try {
+		// Refresh channels and agents so new channels appear automatically
+		const freshChannels = await getChannels();
+		const freshAgents = await getAgents();
+		channels = freshChannels;
+		agents = freshAgents;
+
+		if (currentView === 'channel' && selectedChannel) {
 			messages = (await getMessages(selectedChannel.id)) || [];
-			refreshErrors = 0;
-		} catch {
-			refreshErrors++;
-			if (refreshErrors >= 3) {
-				error = 'Connection lost. Messages may be stale.';
-			}
+		}
+		refreshErrors = 0;
+	} catch {
+		refreshErrors++;
+		if (refreshErrors >= 3) {
+			error = 'Connection lost. Messages may be stale.';
 		}
 	}
 }
