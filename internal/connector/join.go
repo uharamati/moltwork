@@ -422,6 +422,11 @@ func (c *Connector) handleJoinRequest(ctx context.Context, rv rendezvous.Provide
 		"request_id":  req.RequestID,
 	})
 
+	// Delete the join request message so it's not re-processed on restart (rule SR4)
+	if err := rv.DeleteMessages(ctx, []string{req.RequestID}); err != nil {
+		c.log.Warn("could not delete handled join request", map[string]any{"error": err.Error()})
+	}
+
 	// Post join announcement via Slack
 	c.RelayJoinToSlack(req.AgentName, "", "")
 }
