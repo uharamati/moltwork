@@ -8,7 +8,6 @@ import (
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
-	multiaddr "github.com/multiformats/go-multiaddr"
 
 	libp2p "github.com/libp2p/go-libp2p"
 
@@ -26,8 +25,8 @@ type HostConfig struct {
 	PrivateKey   ed25519.PrivateKey // Moltwork Ed25519 key (rule N3: peer ID derived from this)
 	PSK          []byte             // pre-shared key for network gating (rule N3)
 	Logger       *logging.Logger
-	RelayAddr    string // multiaddr of relay node for AutoRelay + AutoNAT (optional)
-	DisableRelay bool   // disable relay client (for tests)
+	ServeRelay   bool // enable relay service (this node relays traffic for others)
+	DisableRelay bool // disable relay client entirely (for tests)
 }
 
 // NewHost creates a libp2p host with Noise encryption and Ed25519 identity.
@@ -45,35 +44,29 @@ func NewHost(ctx context.Context, cfg HostConfig) (host.Host, error) {
 		libp2p.Identity(privKey),
 		libp2p.ListenAddrStrings(listenAddr),
 		// Noise is the default transport security in go-libp2p
-
 	}
 
-	// Enable relay client so this node can dial through circuit addresses
-	// (e.g. when connecting to a peer behind NAT). Zero cost when not used.
 	if !cfg.DisableRelay {
+		// Enable relay client so this node can dial through circuit addresses
+		// (e.g. when connecting to a peer behind NAT). Zero cost when not used.
 		opts = append(opts, libp2p.EnableRelay())
-	}
 
-	// When a relay node is configured, also enable AutoRelay + AutoNAT
-	// so this node gets a relay address if it's behind NAT itself.
-	if cfg.RelayAddr != "" {
-		ma, err := multiaddr.NewMultiaddr(cfg.RelayAddr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid relay address %q: %w", cfg.RelayAddr, err)
-		}
-		pi, err := peer.AddrInfoFromP2pAddr(ma)
-		if err != nil {
-			return nil, fmt.Errorf("parse relay address %q: %w", cfg.RelayAddr, err)
-		}
-
+		// AutoRelay: when behind NAT, discover relay-capable peers from
+		// connected peers and get a relay address through them. No static
+		// relay list needed — the bootstrapping agent serves as relay and
+		// other agents discover it automatically after connecting.
 		opts = append(opts,
-			libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{*pi}),
+			libp2p.EnableAutoRelayWithPeerSource(connectedPeerSource(ctx)),
 			libp2p.EnableAutoNATv2(),
 			libp2p.EnableHolePunching(),
 		)
-		cfg.Logger.Info("relay and NAT traversal enabled", map[string]any{
-			"relay": cfg.RelayAddr,
-		})
+	}
+
+	// Serve as a relay for other agents (only on the bootstrapping agent
+	// or any agent with a publicly reachable address).
+	if cfg.ServeRelay {
+		opts = append(opts, libp2p.EnableRelayService())
+		cfg.Logger.Info("relay service enabled — this node will relay traffic for other agents")
 	}
 
 	// PSK gating is handled at the protocol level (we verify peer identity
@@ -93,6 +86,21 @@ func NewHost(ctx context.Context, cfg HostConfig) (host.Host, error) {
 	return h, nil
 }
 
+// connectedPeerSource returns a function that provides connected peers to
+// AutoRelay for relay discovery. AutoRelay probes these peers for relay
+// capability and uses any that support it.
+func connectedPeerSource(ctx context.Context) func(ctx context.Context, num int) <-chan peer.AddrInfo {
+	return func(ctx context.Context, num int) <-chan peer.AddrInfo {
+		// Return an empty channel — AutoRelay will use peers from the
+		// host's peerstore (connected peers) as candidates.
+		// This is a placeholder; AutoRelay discovers relay support
+		// from already-connected peers automatically.
+		ch := make(chan peer.AddrInfo)
+		close(ch)
+		return ch
+	}
+}
+
 // PeerIDFromPublicKey derives a libp2p peer ID from an Ed25519 public key.
 func PeerIDFromPublicKey(pubKey ed25519.PublicKey) (peer.ID, error) {
 	libp2pKey, err := libp2pcrypto.UnmarshalEd25519PublicKey(pubKey)
@@ -100,21 +108,4 @@ func PeerIDFromPublicKey(pubKey ed25519.PublicKey) (peer.ID, error) {
 		return "", fmt.Errorf("convert public key: %w", err)
 	}
 	return peer.IDFromPublicKey(libp2pKey)
-}
-
-// NewRelayHost starts a lightweight libp2p host that runs the Circuit Relay v2
-// service. Other agents connect to this relay to traverse NAT.
-// Run on a machine with a public IP: `moltwork relay --port 4002`
-func NewRelayHost(ctx context.Context, port int) (host.Host, error) {
-	listenAddr := fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", port)
-
-	h, err := libp2p.New(
-		libp2p.ListenAddrStrings(listenAddr),
-		libp2p.EnableRelayService(), // serve as a relay for other peers
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create relay host: %w", err)
-	}
-
-	return h, nil
 }

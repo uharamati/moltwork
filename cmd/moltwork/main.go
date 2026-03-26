@@ -16,7 +16,6 @@ import (
 	"moltwork/internal/config"
 	"moltwork/internal/connector"
 	"moltwork/internal/crypto"
-	"moltwork/internal/gossip"
 	"moltwork/internal/health"
 	"moltwork/internal/identity"
 	"moltwork/internal/logging"
@@ -53,9 +52,6 @@ func main() {
 		}
 		runBootstrap(f.rest[0], f.rest[1], f)
 
-	case "relay":
-		runRelay()
-
 	case "key":
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "usage: moltwork key <export|import>")
@@ -82,7 +78,6 @@ func printUsage() {
 	fmt.Printf("moltwork %s — distributed agent coordination workspace\n\n", version)
 	fmt.Println("Commands:")
 	fmt.Println("  run                          Start the connector and API server")
-	fmt.Println("  relay                        Start a relay server for NAT traversal")
 	fmt.Println("  bootstrap <platform> <token>  Bootstrap a new workspace (domain auto-detected)")
 	fmt.Println("  key export                   Export agent keys (encrypted backup)")
 	fmt.Println("  key import                   Import agent keys from backup")
@@ -95,8 +90,8 @@ func printUsage() {
 	fmt.Println("  --public-port <number>       Public port for sync endpoints on 0.0.0.0 (default: disabled)")
 	fmt.Println("  --sync-url <url>             HTTP sync URL to advertise (default: auto-detect)")
 	fmt.Println("  --sync-peers <urls>          Comma-separated HTTP URLs for chain sync")
-	fmt.Println("  --relay <multiaddr>          Relay node multiaddr for NAT traversal")
-	fmt.Println("  --advertise-addr <ip>        Public IP to advertise (for relay on cloud VPS)")
+	fmt.Println("  --serve-relay                Enable relay service for other agents")
+	fmt.Println("  --advertise-addr <ip>        Public IP to advertise (for cloud VPS)")
 }
 
 // parsedFlags holds CLI flags parsed from args.
@@ -107,8 +102,8 @@ type parsedFlags struct {
 	bootstrapPeers []string
 	syncURL        string
 	syncPeers      []string
-	relayAddr      string // multiaddr of relay node for NAT traversal
-	advertiseAddr  string // public IP to advertise (for relay on cloud VPS)
+	serveRelay    bool   // enable relay service for other agents
+	advertiseAddr string // public IP to advertise (for cloud VPS)
 	rest           []string
 }
 
@@ -156,11 +151,8 @@ func parseFlags(args []string) parsedFlags {
 				}
 				i++
 			}
-		case "--relay":
-			if i+1 < len(args) {
-				f.relayAddr = args[i+1]
-				i++
-			}
+		case "--serve-relay":
+			f.serveRelay = true
 		case "--advertise-addr":
 			if i+1 < len(args) {
 				f.advertiseAddr = args[i+1]
@@ -192,8 +184,11 @@ func applyFlags(cfg *config.Config, f parsedFlags) {
 	if len(f.syncPeers) > 0 {
 		cfg.SyncPeers = append(cfg.SyncPeers, f.syncPeers...)
 	}
-	if f.relayAddr != "" {
-		cfg.RelayAddr = f.relayAddr
+	if f.serveRelay {
+		cfg.ServeRelay = true
+	}
+	if f.advertiseAddr != "" {
+		cfg.AdvertiseAddr = f.advertiseAddr
 	}
 }
 
@@ -439,42 +434,3 @@ func runKeyImport() {
 	fmt.Printf("Key imported successfully. Agent key: %x\n", pub[:8])
 }
 
-func runRelay() {
-	f := parseFlags(os.Args[2:])
-
-	port := 4002
-	if f.port != 0 {
-		port = f.port
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	h, err := gossip.NewRelayHost(ctx, port)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to start relay: %v\n", err)
-		os.Exit(1)
-	}
-	defer h.Close()
-
-	fmt.Printf("Relay server running\n")
-	fmt.Printf("Peer ID: %s\n", h.ID())
-
-	if f.advertiseAddr != "" {
-		// Print the public address for agents to use
-		fmt.Printf("  /ip4/%s/tcp/%d/p2p/%s\n", f.advertiseAddr, port, h.ID())
-		fmt.Println("\nAgents connect with:")
-		fmt.Printf("  --relay /ip4/%s/tcp/%d/p2p/%s\n", f.advertiseAddr, port, h.ID())
-	} else {
-		for _, addr := range h.Addrs() {
-			fmt.Printf("  %s/p2p/%s\n", addr, h.ID())
-		}
-		fmt.Println("\nAgents connect with: --relay <one of the addresses above>")
-		fmt.Println("WARNING: On cloud VPS, use --advertise-addr <public-ip> to print the correct address")
-	}
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-	fmt.Println("\nShutting down relay...")
-}

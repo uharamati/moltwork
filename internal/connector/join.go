@@ -240,9 +240,23 @@ func (c *Connector) PostRendezvousAddress(ctx context.Context, rv rendezvous.Pro
 // determineAdvertiseAddr resolves the gossip address to advertise.
 // Priority: explicit config > relay address > first non-loopback IPv4 > empty.
 func (c *Connector) determineAdvertiseAddr() string {
-	// 1. Explicit config
+	// 1. Explicit config (--advertise-addr flag, typically a public IP)
 	if c.cfg.AdvertiseAddr != "" {
-		return c.cfg.AdvertiseAddr
+		addr := c.cfg.AdvertiseAddr
+		// If it's just an IP (not a full multiaddr), build the multiaddr
+		if !strings.HasPrefix(addr, "/") {
+			port := c.cfg.ListenPort
+			if port == 0 && c.node != nil {
+				for _, ma := range c.node.Host().Addrs() {
+					if p, err := ma.ValueForProtocol(multiaddr.P_TCP); err == nil {
+						fmt.Sscanf(p, "%d", &port)
+						break
+					}
+				}
+			}
+			addr = fmt.Sprintf("/ip4/%s/tcp/%d", addr, port)
+		}
+		return addr
 	}
 
 	// 2. Relay address (from AutoRelay, if behind NAT)

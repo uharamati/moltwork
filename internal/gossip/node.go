@@ -50,7 +50,7 @@ type NodeConfig struct {
 	Validator       AgentValidator // validates agent registration and revocation status
 	MinPeers        int            // minimum desired peer connections (default 3)
 	BootstrapPeers  []string       // multiaddr strings for bootstrap peers
-	RelayAddr       string         // multiaddr of relay node for AutoRelay (optional)
+	ServeRelay      bool           // enable relay service for other agents
 	DisableRelay    bool           // disable relay client (for tests)
 }
 
@@ -62,7 +62,7 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 		ListenPort:   cfg.ListenPort,
 		PrivateKey:   cfg.PrivateKey,
 		Logger:       cfg.Logger,
-		RelayAddr:    cfg.RelayAddr,
+		ServeRelay:   cfg.ServeRelay,
 		DisableRelay: cfg.DisableRelay,
 	})
 	if err != nil {
