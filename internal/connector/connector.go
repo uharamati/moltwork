@@ -143,6 +143,7 @@ func (c *Connector) Start(ctx context.Context) error {
 		SyncInterval:    10 * time.Second,
 		Validator:       c.registry,
 		BootstrapPeers:  c.cfg.BootstrapPeers,
+		EnableRelay:     true, // enable NAT traversal via public relays
 	})
 	if err != nil {
 		c.Close()
@@ -544,10 +545,19 @@ func (c *Connector) startJoinRequestWatcher() {
 	}()
 	c.log.Info("join request watcher started")
 
-	// Post our gossip address so new agents can discover us
-	if err := c.PostRendezvousAddress(c.ctx, rv); err != nil {
-		c.log.Warn("could not post rendezvous address", map[string]any{"error": err.Error()})
-	}
+	// Wait for relay address before posting to Slack.
+	// AutoRelay needs a few seconds to detect NAT and connect to a relay.
+	// If we post before the relay address is available, we'd advertise
+	// a private IP that other networks can't reach.
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.log.Info("waiting for relay address before posting rendezvous...")
+		c.node.WaitForRelayAddr(30 * time.Second)
+		if err := c.PostRendezvousAddress(c.ctx, rv); err != nil {
+			c.log.Warn("could not post rendezvous address", map[string]any{"error": err.Error()})
+		}
+	}()
 }
 
 // Close shuts down all subsystems.

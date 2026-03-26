@@ -50,6 +50,7 @@ type NodeConfig struct {
 	Validator       AgentValidator // validates agent registration and revocation status
 	MinPeers        int            // minimum desired peer connections (default 3)
 	BootstrapPeers  []string       // multiaddr strings for bootstrap peers
+	EnableRelay     bool           // enable AutoRelay + AutoNAT for NAT traversal (default true in production)
 }
 
 // NewNode creates and starts a gossip node.
@@ -57,9 +58,10 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 	ctx, cancel := context.WithCancel(parentCtx)
 
 	h, err := NewHost(ctx, HostConfig{
-		ListenPort: cfg.ListenPort,
-		PrivateKey: cfg.PrivateKey,
-		Logger:     cfg.Logger,
+		ListenPort:  cfg.ListenPort,
+		PrivateKey:  cfg.PrivateKey,
+		Logger:      cfg.Logger,
+		EnableRelay: cfg.EnableRelay,
 	})
 	if err != nil {
 		cancel()
@@ -235,6 +237,61 @@ func (n *Node) LastSyncTime() time.Time {
 // Called when PSK is rotated (e.g., after agent revocation).
 func (n *Node) UpdatePSK(newPSK []byte) {
 	n.psk = newPSK
+}
+
+// RelayAddrs returns any relay (circuit) addresses the host has acquired.
+// These are addresses like /p2p/RELAY/p2p-circuit/p2p/SELF that allow
+// peers on other networks to connect through the relay.
+func (n *Node) RelayAddrs() []multiaddr.Multiaddr {
+	var relayAddrs []multiaddr.Multiaddr
+	for _, addr := range n.host.Addrs() {
+		if isRelayAddr(addr) {
+			relayAddrs = append(relayAddrs, addr)
+		}
+	}
+	return relayAddrs
+}
+
+// WaitForRelayAddr waits up to timeout for the host to acquire a relay
+// address (indicating AutoRelay has connected to a public relay because
+// AutoNAT detected we're behind NAT). Returns immediately if relay addrs
+// are already available or if the node is publicly reachable.
+func (n *Node) WaitForRelayAddr(timeout time.Duration) []multiaddr.Multiaddr {
+	// Check if we already have relay addresses
+	if addrs := n.RelayAddrs(); len(addrs) > 0 {
+		return addrs
+	}
+
+	deadline := time.After(timeout)
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-deadline:
+			n.log.Info("relay address wait timed out, using available addresses")
+			return n.RelayAddrs()
+		case <-n.ctx.Done():
+			return nil
+		case <-ticker.C:
+			if addrs := n.RelayAddrs(); len(addrs) > 0 {
+				n.log.Info("relay address acquired", map[string]any{
+					"addrs": addrs,
+				})
+				return addrs
+			}
+		}
+	}
+}
+
+// isRelayAddr checks if a multiaddr contains /p2p-circuit/ (indicating a relay address).
+func isRelayAddr(addr multiaddr.Multiaddr) bool {
+	for _, p := range addr.Protocols() {
+		if p.Code == multiaddr.P_CIRCUIT {
+			return true
+		}
+	}
+	return false
 }
 
 // Close shuts down the gossip node.

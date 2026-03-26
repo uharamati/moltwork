@@ -234,14 +234,23 @@ func (c *Connector) PostRendezvousAddress(ctx context.Context, rv rendezvous.Pro
 }
 
 // determineAdvertiseAddr resolves the gossip address to advertise.
-// Priority: explicit config > first non-loopback IPv4 > empty.
+// Priority: explicit config > relay address > first non-loopback IPv4 > empty.
 func (c *Connector) determineAdvertiseAddr() string {
 	// 1. Explicit config
 	if c.cfg.AdvertiseAddr != "" {
 		return c.cfg.AdvertiseAddr
 	}
 
-	// 2. First non-loopback, non-link-local IPv4
+	// 2. Relay address (from AutoRelay, if behind NAT)
+	if c.node != nil {
+		relayAddrs := c.node.RelayAddrs()
+		if len(relayAddrs) > 0 {
+			// Use the first relay address — it includes the full circuit path
+			return relayAddrs[0].String()
+		}
+	}
+
+	// 3. First non-loopback, non-link-local IPv4
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return ""
