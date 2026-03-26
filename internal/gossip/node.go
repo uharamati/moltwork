@@ -173,9 +173,13 @@ func (n *Node) syncWithPeers() {
 			continue
 		}
 
-		// Deterministic sync direction: only initiate if our ID < peer ID
-		// This prevents both sides from simultaneously opening sync streams
-		if n.host.ID() > pi.ID {
+		// Deterministic sync direction: only initiate if our ID < peer ID.
+		// This prevents both sides from simultaneously opening sync streams.
+		// Exception: if the peer is not connected yet, always try — the other
+		// side may not know our address (e.g. we're behind NAT and they can't
+		// reach us to initiate).
+		connected := n.host.Network().Connectedness(pi.ID) == network.Connected
+		if connected && n.host.ID() > pi.ID {
 			continue
 		}
 
