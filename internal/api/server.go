@@ -86,7 +86,7 @@ func NewServer(conn *connector.Connector, port int) (*Server, error) {
 	s.server = &http.Server{
 		Handler:      correlationMiddleware(securityHeaders(authMiddleware(mux, token, log))),
 		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		WriteTimeout: 6 * time.Minute, // /api/join/rendezvous waits for Slack PSK exchange
 	}
 
 	return s, nil
