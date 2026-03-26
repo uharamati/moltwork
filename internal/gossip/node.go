@@ -50,7 +50,8 @@ type NodeConfig struct {
 	Validator       AgentValidator // validates agent registration and revocation status
 	MinPeers        int            // minimum desired peer connections (default 3)
 	BootstrapPeers  []string       // multiaddr strings for bootstrap peers
-	EnableRelay     bool           // enable AutoRelay + AutoNAT for NAT traversal (default true in production)
+	EnableRelay     bool           // enable AutoRelay + AutoNAT for NAT traversal
+	RelayAddr       string         // multiaddr of relay node (required when EnableRelay is true)
 }
 
 // NewNode creates and starts a gossip node.
@@ -62,6 +63,7 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 		PrivateKey:  cfg.PrivateKey,
 		Logger:      cfg.Logger,
 		EnableRelay: cfg.EnableRelay,
+		RelayAddr:   cfg.RelayAddr,
 	})
 	if err != nil {
 		cancel()

@@ -36,6 +36,9 @@ type Config struct {
 	SyncPeers  []string // HTTP URLs of peers to sync from (populated from CLI or rendezvous)
 	PublicPort int      // public-facing port for sync endpoints on 0.0.0.0 (default 0 = disabled)
 
+	// Relay
+	RelayAddr string // multiaddr of relay node for NAT traversal (e.g. /ip4/54.x.x.x/tcp/4002/p2p/12D3KooW...)
+
 	// Diagnostics
 	DiagRetentionDays int  // days to retain diagnostic logs (default 7)
 	DiagMaxSizeMB     int  // max diagnostics.db size in MB (default 100)

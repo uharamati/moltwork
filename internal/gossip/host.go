@@ -26,7 +26,8 @@ type HostConfig struct {
 	PrivateKey   ed25519.PrivateKey // Moltwork Ed25519 key (rule N3: peer ID derived from this)
 	PSK          []byte             // pre-shared key for network gating (rule N3)
 	Logger       *logging.Logger
-	EnableRelay  bool // enable AutoRelay + AutoNAT + hole punching for NAT traversal
+	EnableRelay  bool   // enable AutoRelay + AutoNAT + hole punching for NAT traversal
+	RelayAddr    string // multiaddr of relay node (required when EnableRelay is true)
 }
 
 // NewHost creates a libp2p host with Noise encryption and Ed25519 identity.
@@ -47,19 +48,26 @@ func NewHost(ctx context.Context, cfg HostConfig) (host.Host, error) {
 	}
 
 	// Enable relay support for NAT traversal when configured.
-	// AutoRelay connects to public relay nodes when behind NAT.
-	// AutoNATv2 detects whether we're behind NAT.
-	// HolePunching attempts direct connections through NAT after relay.
-	if cfg.EnableRelay {
-		relays := publicRelayPeers()
+	// The agent connects outbound to the relay node, which provides a
+	// publicly reachable address. Other agents connect through the relay.
+	if cfg.EnableRelay && cfg.RelayAddr != "" {
+		ma, err := multiaddr.NewMultiaddr(cfg.RelayAddr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid relay address %q: %w", cfg.RelayAddr, err)
+		}
+		pi, err := peer.AddrInfoFromP2pAddr(ma)
+		if err != nil {
+			return nil, fmt.Errorf("parse relay address %q: %w", cfg.RelayAddr, err)
+		}
+
 		opts = append(opts,
 			libp2p.EnableRelay(),
-			libp2p.EnableAutoRelayWithStaticRelays(relays),
+			libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{*pi}),
 			libp2p.EnableAutoNATv2(),
 			libp2p.EnableHolePunching(),
 		)
 		cfg.Logger.Info("relay and NAT traversal enabled", map[string]any{
-			"static_relays": len(relays),
+			"relay": cfg.RelayAddr,
 		})
 	}
 
@@ -89,30 +97,19 @@ func PeerIDFromPublicKey(pubKey ed25519.PublicKey) (peer.ID, error) {
 	return peer.IDFromPublicKey(libp2pKey)
 }
 
-// publicRelayPeers returns well-known public libp2p relay nodes.
-// These are operated by Protocol Labs and the IPFS community.
-func publicRelayPeers() []peer.AddrInfo {
-	// Public relay nodes from the libp2p/IPFS network.
-	// These support Circuit Relay v2 and are available globally.
-	relayAddrs := []string{
-		"/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
-		"/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
-		"/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
-		"/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
-		"/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ",
+// NewRelayHost starts a lightweight libp2p host that runs the Circuit Relay v2
+// service. Other agents connect to this relay to traverse NAT.
+// Run on a machine with a public IP: `moltwork relay --port 4002`
+func NewRelayHost(ctx context.Context, port int) (host.Host, error) {
+	listenAddr := fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", port)
+
+	h, err := libp2p.New(
+		libp2p.ListenAddrStrings(listenAddr),
+		libp2p.EnableRelayService(), // serve as a relay for other peers
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create relay host: %w", err)
 	}
 
-	var peers []peer.AddrInfo
-	for _, addrStr := range relayAddrs {
-		ma, err := multiaddr.NewMultiaddr(addrStr)
-		if err != nil {
-			continue
-		}
-		pi, err := peer.AddrInfoFromP2pAddr(ma)
-		if err != nil {
-			continue
-		}
-		peers = append(peers, *pi)
-	}
-	return peers
+	return h, nil
 }
