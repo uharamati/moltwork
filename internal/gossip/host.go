@@ -46,17 +46,41 @@ func NewHost(ctx context.Context, cfg HostConfig) (host.Host, error) {
 		// Noise is the default transport security in go-libp2p
 	}
 
+	// hostRef is set after host creation so the peer source can access
+	// connected peers. This is safe because AutoRelay doesn't call the
+	// peer source until after the host is fully initialized.
+	var hostRef host.Host
+
 	if !cfg.DisableRelay {
 		// Enable relay client so this node can dial through circuit addresses
 		// (e.g. when connecting to a peer behind NAT). Zero cost when not used.
 		opts = append(opts, libp2p.EnableRelay())
 
 		// AutoRelay: when behind NAT, discover relay-capable peers from
-		// connected peers and get a relay address through them. No static
-		// relay list needed — the bootstrapping agent serves as relay and
-		// other agents discover it automatically after connecting.
+		// connected peers and get a relay address through them.
 		opts = append(opts,
-			libp2p.EnableAutoRelayWithPeerSource(connectedPeerSource(ctx)),
+			libp2p.EnableAutoRelayWithPeerSource(
+				func(ctx context.Context, num int) <-chan peer.AddrInfo {
+					ch := make(chan peer.AddrInfo)
+					go func() {
+						defer close(ch)
+						if hostRef == nil {
+							return
+						}
+						for _, p := range hostRef.Network().Peers() {
+							select {
+							case ch <- peer.AddrInfo{
+								ID:    p,
+								Addrs: hostRef.Network().Peerstore().Addrs(p),
+							}:
+							case <-ctx.Done():
+								return
+							}
+						}
+					}()
+					return ch
+				},
+			),
 			libp2p.EnableAutoNATv2(),
 			libp2p.EnableHolePunching(),
 		)
@@ -77,6 +101,7 @@ func NewHost(ctx context.Context, cfg HostConfig) (host.Host, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create libp2p host: %w", err)
 	}
+	hostRef = h
 
 	cfg.Logger.Info("libp2p host started", map[string]any{
 		"peer_id":   h.ID().String(),
@@ -84,21 +109,6 @@ func NewHost(ctx context.Context, cfg HostConfig) (host.Host, error) {
 	})
 
 	return h, nil
-}
-
-// connectedPeerSource returns a function that provides connected peers to
-// AutoRelay for relay discovery. AutoRelay probes these peers for relay
-// capability and uses any that support it.
-func connectedPeerSource(ctx context.Context) func(ctx context.Context, num int) <-chan peer.AddrInfo {
-	return func(ctx context.Context, num int) <-chan peer.AddrInfo {
-		// Return an empty channel — AutoRelay will use peers from the
-		// host's peerstore (connected peers) as candidates.
-		// This is a placeholder; AutoRelay discovers relay support
-		// from already-connected peers automatically.
-		ch := make(chan peer.AddrInfo)
-		close(ch)
-		return ch
-	}
 }
 
 // PeerIDFromPublicKey derives a libp2p peer ID from an Ed25519 public key.

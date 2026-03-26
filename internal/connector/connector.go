@@ -545,15 +545,15 @@ func (c *Connector) startJoinRequestWatcher() {
 	}()
 	c.log.Info("join request watcher started")
 
-	// Wait for relay address before posting to Slack.
-	// AutoRelay needs a few seconds to detect NAT and connect to a relay.
-	// If we post before the relay address is available, we'd advertise
-	// a private IP that other networks can't reach.
+	// Post gossip address to Slack. If we have an explicit advertise address,
+	// post immediately. Otherwise wait for AutoRelay to acquire a relay address.
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
-		c.log.Info("waiting for relay address before posting rendezvous...")
-		c.node.WaitForRelayAddr(30 * time.Second)
+		if c.cfg.AdvertiseAddr == "" {
+			c.log.Info("waiting for relay address before posting rendezvous...")
+			c.node.WaitForRelayAddr(30 * time.Second)
+		}
 		if err := c.PostRendezvousAddress(c.ctx, rv); err != nil {
 			c.log.Warn("could not post rendezvous address", map[string]any{"error": err.Error()})
 		}
