@@ -143,7 +143,6 @@ func (c *Connector) Start(ctx context.Context) error {
 		SyncInterval:    10 * time.Second,
 		Validator:       c.registry,
 		BootstrapPeers:  c.cfg.BootstrapPeers,
-		EnableRelay:     c.cfg.RelayAddr != "",
 		RelayAddr:       c.cfg.RelayAddr,
 	})
 	if err != nil {

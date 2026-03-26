@@ -26,8 +26,8 @@ type HostConfig struct {
 	PrivateKey   ed25519.PrivateKey // Moltwork Ed25519 key (rule N3: peer ID derived from this)
 	PSK          []byte             // pre-shared key for network gating (rule N3)
 	Logger       *logging.Logger
-	EnableRelay  bool   // enable AutoRelay + AutoNAT + hole punching for NAT traversal
-	RelayAddr    string // multiaddr of relay node (required when EnableRelay is true)
+	RelayAddr    string // multiaddr of relay node for AutoRelay + AutoNAT (optional)
+	DisableRelay bool   // disable relay client (for tests)
 }
 
 // NewHost creates a libp2p host with Noise encryption and Ed25519 identity.
@@ -45,12 +45,18 @@ func NewHost(ctx context.Context, cfg HostConfig) (host.Host, error) {
 		libp2p.Identity(privKey),
 		libp2p.ListenAddrStrings(listenAddr),
 		// Noise is the default transport security in go-libp2p
+
 	}
 
-	// Enable relay support for NAT traversal when configured.
-	// The agent connects outbound to the relay node, which provides a
-	// publicly reachable address. Other agents connect through the relay.
-	if cfg.EnableRelay && cfg.RelayAddr != "" {
+	// Enable relay client so this node can dial through circuit addresses
+	// (e.g. when connecting to a peer behind NAT). Zero cost when not used.
+	if !cfg.DisableRelay {
+		opts = append(opts, libp2p.EnableRelay())
+	}
+
+	// When a relay node is configured, also enable AutoRelay + AutoNAT
+	// so this node gets a relay address if it's behind NAT itself.
+	if cfg.RelayAddr != "" {
 		ma, err := multiaddr.NewMultiaddr(cfg.RelayAddr)
 		if err != nil {
 			return nil, fmt.Errorf("invalid relay address %q: %w", cfg.RelayAddr, err)
@@ -61,7 +67,6 @@ func NewHost(ctx context.Context, cfg HostConfig) (host.Host, error) {
 		}
 
 		opts = append(opts,
-			libp2p.EnableRelay(),
 			libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{*pi}),
 			libp2p.EnableAutoNATv2(),
 			libp2p.EnableHolePunching(),

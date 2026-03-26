@@ -153,8 +153,12 @@ func (c *Connector) JoinExisting(ctx context.Context, rv rendezvous.Provider, pl
 			continue
 		}
 
-		// Parse multiaddr and create peer.AddrInfo
-		fullAddr := fmt.Sprintf("%s/p2p/%s", addr.Multiaddr, addr.PeerID)
+		// Parse multiaddr and create peer.AddrInfo.
+		// Relay addresses already contain /p2p/PeerID — don't double it.
+		fullAddr := addr.Multiaddr
+		if !strings.Contains(fullAddr, "/p2p/"+addr.PeerID) {
+			fullAddr = fmt.Sprintf("%s/p2p/%s", fullAddr, addr.PeerID)
+		}
 		ma, err := multiaddr.NewMultiaddr(fullAddr)
 		if err != nil {
 			c.log.Warn("invalid multiaddr from rendezvous", map[string]any{

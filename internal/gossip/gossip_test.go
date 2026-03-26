@@ -126,6 +126,7 @@ func TestTwoNodeSync(t *testing.T) {
 		LogDB:        logDB1,
 		Logger:       log,
 		SyncInterval: 1 * time.Second,
+		DisableRelay: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -139,6 +140,7 @@ func TestTwoNodeSync(t *testing.T) {
 		LogDB:        logDB2,
 		Logger:       log,
 		SyncInterval: 1 * time.Second,
+		DisableRelay: true,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -50,8 +50,8 @@ type NodeConfig struct {
 	Validator       AgentValidator // validates agent registration and revocation status
 	MinPeers        int            // minimum desired peer connections (default 3)
 	BootstrapPeers  []string       // multiaddr strings for bootstrap peers
-	EnableRelay     bool           // enable AutoRelay + AutoNAT for NAT traversal
-	RelayAddr       string         // multiaddr of relay node (required when EnableRelay is true)
+	RelayAddr       string         // multiaddr of relay node for AutoRelay (optional)
+	DisableRelay    bool           // disable relay client (for tests)
 }
 
 // NewNode creates and starts a gossip node.
@@ -59,11 +59,11 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 	ctx, cancel := context.WithCancel(parentCtx)
 
 	h, err := NewHost(ctx, HostConfig{
-		ListenPort:  cfg.ListenPort,
-		PrivateKey:  cfg.PrivateKey,
-		Logger:      cfg.Logger,
-		EnableRelay: cfg.EnableRelay,
-		RelayAddr:   cfg.RelayAddr,
+		ListenPort:   cfg.ListenPort,
+		PrivateKey:   cfg.PrivateKey,
+		Logger:       cfg.Logger,
+		RelayAddr:    cfg.RelayAddr,
+		DisableRelay: cfg.DisableRelay,
 	})
 	if err != nil {
 		cancel()
