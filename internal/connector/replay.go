@@ -344,9 +344,11 @@ func (c *Connector) replayGroupKeyDistributes() {
 			continue
 		}
 
-		// Check if we already have a key at this epoch or newer
-		_, existingEpoch, _ := c.keyDB.GetGroupKey(dist.ChannelID)
-		if existingEpoch >= int(dist.Epoch) {
+		// Check if we already have a key at this epoch or newer.
+		// Use strict greater-than so epoch 0 (initial key) is always accepted
+		// when we don't have any key yet (GetGroupKey returns epoch 0 with nil key).
+		existingKey, existingEpoch, _ := c.keyDB.GetGroupKey(dist.ChannelID)
+		if existingKey != nil && existingEpoch >= int(dist.Epoch) {
 			continue
 		}
 
@@ -364,8 +366,10 @@ func (c *Connector) replayGroupKeyDistributes() {
 		decrypted, err := crypto.OpenFromPeer(secretArr, dist.Sealed)
 		if err != nil {
 			c.log.Warn("replay group key distribute: decrypt failed", map[string]any{
-				"sender": fmt.Sprintf("%x", raw.AuthorKey[:8]),
-				"error":  err.Error(),
+				"sender":     fmt.Sprintf("%x", raw.AuthorKey[:8]),
+				"error":      err.Error(),
+				"sealed_len": len(dist.Sealed),
+				"secret_hex": fmt.Sprintf("%x", secret[:8]),
 			})
 			continue
 		}
