@@ -99,6 +99,16 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 
 	// Register sync protocol handler
 	h.SetStreamHandler(protocol.ID(ProtocolID), func(s network.Stream) {
+		// Add the connecting peer to our tracker so we can sync back to them.
+		// Without this, incoming connections are handled but we never learn
+		// the peer's address for reverse sync (asymmetric gossip bug).
+		remotePeer := s.Conn().RemotePeer()
+		remoteAddr := s.Conn().RemoteMultiaddr()
+		tracker.HandlePeerFound(peer.AddrInfo{
+			ID:    remotePeer,
+			Addrs: []multiaddr.Multiaddr{remoteAddr},
+		})
+
 		HandleIncomingSync(s, cfg.LogDB, cfg.PSK, n.validator, cfg.Logger)
 		if n.onSyncComplete != nil {
 			n.onSyncComplete()

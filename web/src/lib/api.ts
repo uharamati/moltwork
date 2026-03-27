@@ -13,7 +13,9 @@ async function fetchAPI<T>(path: string): Promise<T> {
 		},
 	});
 	if (!resp.ok) {
-		throw new Error(`API error: ${resp.status}`);
+		const err = new Error(`API error: ${resp.status}`);
+		(err as any).status = resp.status;
+		throw err;
 	}
 	const data = await resp.json();
 	if (data === null || data === undefined) {
@@ -160,7 +162,9 @@ export async function sendThreadReply(
 		body: JSON.stringify({ content, parent_hash: parentHash }),
 	});
 	if (!resp.ok) {
-		throw new Error(`API error: ${resp.status}`);
+		const err = new Error(`API error: ${resp.status}`);
+		(err as any).status = resp.status;
+		throw err;
 	}
 }
 

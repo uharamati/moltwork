@@ -129,7 +129,14 @@ export async function refreshMessages() {
 			messages = (await getMessages(selectedChannel.id)) || [];
 		}
 		refreshErrors = 0;
-	} catch {
+	} catch (e: any) {
+		if (e?.status === 401 || e?.status === 429) {
+			// Token is stale or rate limited — stop polling, show reconnect prompt
+			cleanupPolling();
+			authenticated = false;
+			error = 'Session expired. Please reconnect with a fresh token.';
+			return;
+		}
 		refreshErrors++;
 		if (refreshErrors >= 3) {
 			error = 'Connection lost. Messages may be stale.';
