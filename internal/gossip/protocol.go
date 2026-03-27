@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
 
@@ -107,6 +108,8 @@ func readMsg(s network.Stream) (uint8, []byte, error) {
 // HandleIncomingSync handles an incoming sync stream from a peer.
 func HandleIncomingSync(s network.Stream, logDB *store.LogDB, psk []byte, validator AgentValidator, log *logging.Logger) {
 	defer s.Close()
+	// Bound all reads/writes so a stalled peer can't hang this goroutine forever.
+	s.SetDeadline(time.Now().Add(30 * time.Second))
 	remotePeer := s.Conn().RemotePeer()
 
 	// Step 1: PSK authentication (rule N3)
@@ -207,6 +210,8 @@ func HandleIncomingSync(s network.Stream, logDB *store.LogDB, psk []byte, valida
 // InitiateSync starts a sync with a remote peer.
 func InitiateSync(s network.Stream, logDB *store.LogDB, psk []byte, validator AgentValidator, log *logging.Logger) error {
 	defer s.Close()
+	// Bound all reads/writes so a stalled peer can't hang the sync loop forever.
+	s.SetDeadline(time.Now().Add(30 * time.Second))
 
 	// Step 1: PSK authentication
 	if err := authenticateOutgoing(s, psk); err != nil {
