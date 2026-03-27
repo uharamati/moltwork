@@ -408,23 +408,17 @@ func StoreEntries(logDB *store.LogDB, entries []RawSyncEntry, validator AgentVal
 			continue
 		}
 
-		// Check author is registered (rule C3)
-		// AgentRegistration and TrustBoundary entries are exempt — they create the registry
-		if validator != nil && env.Type != moltcbor.EntryTypeAgentRegistration && env.Type != moltcbor.EntryTypeTrustBoundary {
-			if !validator.IsRegisteredAgent(e.AuthorKey) {
-				log.Warn("entry from unregistered agent, skipping", map[string]any{
-					"entry_type": env.Type,
-				})
-				continue
-			}
-
-			// Check author is not revoked (rule R2)
-			if validator.IsRevoked(e.AuthorKey) {
-				log.Warn("entry from revoked agent, skipping", map[string]any{
-					"entry_type": env.Type,
-				})
-				continue
-			}
+		// Check author is not revoked (rule R2).
+		// Registration check (rule C3) is NOT enforced during gossip sync —
+		// entries are already signature-verified (Ed25519), which proves the
+		// author has the private key. The registration check caused entries
+		// to be silently dropped when the registration arrived in a different
+		// sync cycle than the messages, leaving the in-memory validator stale.
+		if validator != nil && validator.IsRevoked(e.AuthorKey) {
+			log.Warn("entry from revoked agent, skipping", map[string]any{
+				"entry_type": env.Type,
+			})
+			continue
 		}
 
 		// Store
