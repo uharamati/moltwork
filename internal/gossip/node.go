@@ -109,7 +109,7 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 			Addrs: []multiaddr.Multiaddr{remoteAddr},
 		})
 
-		HandleIncomingSync(s, cfg.LogDB, cfg.PSK, n.validator, cfg.Logger)
+		HandleIncomingSync(s, cfg.LogDB, n.psk, n.validator, cfg.Logger)
 		if n.onSyncComplete != nil {
 			n.onSyncComplete()
 		}
