@@ -26,11 +26,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	_, tbDomain, tbErr := s.conn.GetTrustBoundary()
 	bootstrapped := tbErr == nil && tbDomain != ""
 
+	entryCount, _ := s.conn.LogDB().EntryCount()
 	status := map[string]any{
 		"status":       "running",
 		"bootstrapped": bootstrapped,
 		"agent_key":    fmt.Sprintf("%x", s.conn.KeyPair().Public),
-		"entry_count":  s.conn.DAG().Len(),
+		"entry_count":  entryCount,
 		"agent_count":  s.conn.Registry().Count(),
 		"version":      s.version,
 	}

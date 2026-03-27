@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/libp2p/go-libp2p/core/peer"
+	multiaddr "github.com/multiformats/go-multiaddr"
 
 	moltcbor "moltwork/internal/cbor"
 	"moltwork/internal/channel"
@@ -174,6 +178,9 @@ func (c *Connector) Start(ctx context.Context) error {
 
 	// Start watching for join requests from new agents (welcoming agent role)
 	c.startJoinRequestWatcher()
+
+	// Re-discover peers from Slack on restart (bug 12)
+	c.rediscoverPeersFromSlack()
 
 	// Initialize sync peer URLs from config and start background HTTP sync
 	c.syncPeerURLs = append(c.syncPeerURLs, c.cfg.SyncPeers...)
@@ -565,6 +572,53 @@ func (c *Connector) startJoinRequestWatcher() {
 			c.log.Warn("could not post rendezvous address", map[string]any{"error": err.Error()})
 		}
 	}()
+}
+
+// rediscoverPeersFromSlack re-reads gossip addresses from #moltwork-agents
+// to populate the peer tracker on restart (bug 12).
+func (c *Connector) rediscoverPeersFromSlack() {
+	token, platform, _, err := c.keyDB.GetPlatformToken()
+	if err != nil || token == nil || platform != "slack" {
+		return
+	}
+	psk := c.GetPSK()
+	if psk == nil {
+		return // not joined yet
+	}
+
+	rv := rendezvous.NewSlackProvider(string(token), c.log)
+	exists, err := rv.WorkspaceExists(c.ctx)
+	if err != nil || !exists {
+		return
+	}
+
+	addrs, err := rv.GetGossipAddresses(c.ctx)
+	if err != nil || len(addrs) == 0 {
+		return
+	}
+
+	for _, addr := range addrs {
+		if addr.Multiaddr == "" || addr.PeerID == "" {
+			continue
+		}
+		fullAddr := addr.Multiaddr
+		if !strings.Contains(fullAddr, "/p2p/"+addr.PeerID) {
+			fullAddr = fmt.Sprintf("%s/p2p/%s", fullAddr, addr.PeerID)
+		}
+		ma, err := multiaddr.NewMultiaddr(fullAddr)
+		if err != nil {
+			continue
+		}
+		pi, err := peer.AddrInfoFromP2pAddr(ma)
+		if err != nil {
+			continue
+		}
+		c.node.Tracker().HandlePeerFound(*pi)
+	}
+
+	if len(addrs) > 0 {
+		c.log.Info("rediscovered peers from Slack", map[string]any{"count": len(addrs)})
+	}
 }
 
 // Close shuts down all subsystems.

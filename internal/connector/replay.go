@@ -144,6 +144,16 @@ func (c *Connector) replayChannelState() {
 		}
 	}
 
+	// Permanent channels: all registered agents are members automatically
+	allAgents := c.registry.All()
+	for _, ch := range c.channels.All() {
+		if ch.Type == moltcbor.ChannelTypePermanent {
+			for _, agent := range allAgents {
+				ch.AddMember(agent.PublicKey)
+			}
+		}
+	}
+
 	if channels > 0 || members > 0 {
 		c.log.Info("replayed channel state", map[string]any{
 			"channels": channels,

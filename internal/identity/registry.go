@@ -184,6 +184,18 @@ func (r *Registry) RegisterAgentKey(pubKey []byte) {
 	}
 }
 
+// RegisterAgent registers an agent with full details from a synced registration entry.
+func (r *Registry) RegisterAgent(pubKey []byte, displayName, platform, platformUserID, title, team string) {
+	r.Register(&Agent{
+		PublicKey:      pubKey,
+		PlatformUserID: platformUserID,
+		Platform:       platform,
+		DisplayName:    displayName,
+		Title:          title,
+		Team:           team,
+	})
+}
+
 // Count returns the number of registered agents.
 func (r *Registry) Count() int {
 	r.mu.RLock()

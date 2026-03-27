@@ -18,7 +18,8 @@ import (
 type AgentValidator interface {
 	IsRegisteredAgent(pubKey []byte) bool
 	IsRevoked(pubKey []byte) bool
-	RegisterAgentKey(pubKey []byte) // mark a key as registered (called after storing AgentRegistration)
+	RegisterAgentKey(pubKey []byte)                                                             // mark a key as registered (lightweight)
+	RegisterAgent(pubKey []byte, displayName, platform, platformUserID, title, team string) // register with full details
 }
 
 // SyncMessage types
@@ -109,7 +110,7 @@ func readMsg(s network.Stream) (uint8, []byte, error) {
 func HandleIncomingSync(s network.Stream, logDB *store.LogDB, psk []byte, validator AgentValidator, log *logging.Logger) {
 	defer s.Close()
 	// Bound all reads/writes so a stalled peer can't hang this goroutine forever.
-	s.SetDeadline(time.Now().Add(30 * time.Second))
+	s.SetDeadline(time.Now().Add(60 * time.Second))
 	remotePeer := s.Conn().RemotePeer()
 
 	// Step 1: PSK authentication (rule N3)
@@ -211,7 +212,7 @@ func HandleIncomingSync(s network.Stream, logDB *store.LogDB, psk []byte, valida
 func InitiateSync(s network.Stream, logDB *store.LogDB, psk []byte, validator AgentValidator, log *logging.Logger) error {
 	defer s.Close()
 	// Bound all reads/writes so a stalled peer can't hang the sync loop forever.
-	s.SetDeadline(time.Now().Add(30 * time.Second))
+	s.SetDeadline(time.Now().Add(60 * time.Second))
 
 	// Step 1: PSK authentication
 	if err := authenticateOutgoing(s, psk); err != nil {
@@ -432,10 +433,14 @@ func StoreEntries(logDB *store.LogDB, entries []RawSyncEntry, validator AgentVal
 			continue
 		}
 
-		// After storing a registration entry, update the validator so
-		// subsequent entries from this author pass the registration check.
+		// After storing a registration entry, update the validator with full agent details.
 		if env.Type == moltcbor.EntryTypeAgentRegistration && validator != nil {
-			validator.RegisterAgentKey(e.AuthorKey)
+			var reg moltcbor.AgentRegistration
+			if err := moltcbor.Unmarshal(env.Payload, &reg); err == nil {
+				validator.RegisterAgent(reg.PublicKey, reg.DisplayName, reg.Platform, reg.PlatformUserID, reg.Title, reg.Team)
+			} else {
+				validator.RegisterAgentKey(e.AuthorKey)
+			}
 		}
 	}
 }

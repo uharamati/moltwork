@@ -439,7 +439,8 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.conn.SendMessage(channelID, []byte(req.Content), req.MessageType,
 		req.Action, req.Scope, req.AuthorityBasis, req.Urgency); err != nil {
-		writeError(w, r, err, 500)
+		writeError(w, r, merrors.New("message.send.failed", merrors.Fatal,
+			fmt.Sprintf("Failed to send message: %s", err.Error()), nil), 500)
 		return
 	}
 

@@ -101,6 +101,19 @@ func (c *Connector) JoinExisting(ctx context.Context, rv rendezvous.Provider, pl
 		return fmt.Errorf("read gossip addresses: %w", err)
 	}
 
+	// Filter out stale addresses older than 1 hour (bug 13)
+	cutoff := time.Now().Unix() - 3600
+	var freshAddrs []rendezvous.GossipAddress
+	for _, addr := range addrs {
+		if addr.Timestamp > cutoff {
+			freshAddrs = append(freshAddrs, addr)
+		}
+	}
+	if len(freshAddrs) > 0 {
+		addrs = freshAddrs
+	}
+	// Fall back to all addresses if none are fresh
+
 	if len(addrs) == 0 {
 		return fmt.Errorf("no gossip addresses found in rendezvous channel")
 	}

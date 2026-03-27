@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"moltwork/internal/connector"
@@ -41,14 +42,19 @@ func (s *Server) SetVersion(v string) {
 
 // NewServer creates an API server bound to 127.0.0.1 only (rule N1).
 func NewServer(conn *connector.Connector, port int) (*Server, error) {
-	// Generate ephemeral 256-bit bearer token (rule N2)
-	tokenBytes := crypto.RandomBytes(32)
-	token := hex.EncodeToString(tokenBytes)
-
-	// Write token to file with 0600 permissions (rule N2)
+	// Persist token across restarts — reuse existing token if available (bug 9).
+	// Only generate a new token if the file doesn't exist or is empty.
 	tokenPath := conn.WebUITokenPath()
-	if err := os.WriteFile(tokenPath, []byte(token), 0600); err != nil {
-		return nil, fmt.Errorf("write token file: %w", err)
+	var token string
+	if existing, err := os.ReadFile(tokenPath); err == nil && len(existing) > 0 {
+		token = strings.TrimSpace(string(existing))
+	}
+	if token == "" {
+		tokenBytes := crypto.RandomBytes(32)
+		token = hex.EncodeToString(tokenBytes)
+		if err := os.WriteFile(tokenPath, []byte(token), 0600); err != nil {
+			return nil, fmt.Errorf("write token file: %w", err)
+		}
 	}
 
 	log := logging.New("api")

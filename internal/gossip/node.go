@@ -33,7 +33,12 @@ type Node struct {
 	peerSyncMu sync.Mutex
 	activePeers map[peer.ID]bool
 
+	// Rate-limit peer count warnings
+	peerWarnMu  sync.Mutex
+	lastPeerWarn time.Time
+
 	onSyncComplete func() // called after entries are received via gossip
+	seenPeers      map[peer.ID]bool // deduplicate peer discovery logs
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -93,6 +98,7 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 		limiter:     NewRateLimiter(rateLimit, time.Minute),
 		validator:   cfg.Validator,
 		activePeers: make(map[peer.ID]bool),
+		seenPeers:   make(map[peer.ID]bool),
 		ctx:         ctx,
 		cancel:      cancel,
 	}
@@ -160,24 +166,34 @@ func (n *Node) syncLoop(interval time.Duration) {
 }
 
 // syncWithPeers initiates sync with all known peers.
-// Warns if peer count is below minimum (rule N7).
+// Each peer sync runs in a goroutine so one stalled peer can't block others.
 func (n *Node) syncWithPeers() {
 	peers := n.tracker.Peers()
 
-	// Check minimum peer count (rule N7)
+	// Check minimum peer count — rate-limit to once per minute (bug 14)
 	activePeers := 0
 	for _, pi := range peers {
 		if pi.ID != n.host.ID() && n.host.Network().Connectedness(pi.ID) == network.Connected {
 			activePeers++
 		}
 	}
-	minPeers := 3 // default
+	minPeers := 3
 	if activePeers < minPeers {
-		n.log.Warn("below minimum peer count", map[string]any{
-			"active":  activePeers,
-			"minimum": minPeers,
-		})
+		n.peerWarnMu.Lock()
+		now := time.Now()
+		if now.Sub(n.lastPeerWarn) > time.Minute {
+			n.log.Warn("below minimum peer count", map[string]any{
+				"active":  activePeers,
+				"minimum": minPeers,
+			})
+			n.lastPeerWarn = now
+		}
+		n.peerWarnMu.Unlock()
 	}
+
+	var wg sync.WaitGroup
+	synced := false
+
 	for _, pi := range peers {
 		if pi.ID == n.host.ID() {
 			continue
@@ -192,7 +208,9 @@ func (n *Node) syncWithPeers() {
 		n.activePeers[pi.ID] = true
 		n.peerSyncMu.Unlock()
 
-		func() {
+		wg.Add(1)
+		go func(pi peer.AddrInfo) {
+			defer wg.Done()
 			defer func() {
 				n.peerSyncMu.Lock()
 				delete(n.activePeers, pi.ID)
@@ -222,16 +240,19 @@ func (n *Node) syncWithPeers() {
 				n.log.Debug("sync failed", map[string]any{"peer": pi.ID.String(), "error": err.Error()})
 			} else {
 				n.log.Debug("sync completed", map[string]any{"peer": pi.ID.String()})
+				synced = true
 			}
-		}()
+		}(pi)
 	}
+
+	wg.Wait()
 
 	n.syncMu.Lock()
 	n.lastSyncTime = time.Now()
 	n.syncMu.Unlock()
 
 	// Notify the connector to rebuild in-memory state from new entries
-	if n.onSyncComplete != nil {
+	if synced && n.onSyncComplete != nil {
 		n.onSyncComplete()
 	}
 }

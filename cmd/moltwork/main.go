@@ -203,6 +203,14 @@ func applyFlags(cfg *config.Config, f parsedFlags) {
 }
 
 func runServer() {
+	// Catch panics and log them before exiting (bug 11 — silent crashes)
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "PANIC: %v\n", r)
+			os.Exit(1)
+		}
+	}()
+
 	log := logging.New("main")
 	cfg := config.Default()
 	f := parseFlags(os.Args[2:])
