@@ -191,9 +191,6 @@ func (n *Node) syncWithPeers() {
 		n.peerWarnMu.Unlock()
 	}
 
-	var wg sync.WaitGroup
-	synced := false
-
 	for _, pi := range peers {
 		if pi.ID == n.host.ID() {
 			continue
@@ -208,9 +205,9 @@ func (n *Node) syncWithPeers() {
 		n.activePeers[pi.ID] = true
 		n.peerSyncMu.Unlock()
 
-		wg.Add(1)
+		// Run in background — don't block the sync loop waiting for completion.
+		// Each goroutine cleans up activePeers and calls onSyncComplete on success.
 		go func(pi peer.AddrInfo) {
-			defer wg.Done()
 			defer func() {
 				n.peerSyncMu.Lock()
 				delete(n.activePeers, pi.ID)
@@ -240,20 +237,14 @@ func (n *Node) syncWithPeers() {
 				n.log.Debug("sync failed", map[string]any{"peer": pi.ID.String(), "error": err.Error()})
 			} else {
 				n.log.Debug("sync completed", map[string]any{"peer": pi.ID.String()})
-				synced = true
+				n.syncMu.Lock()
+				n.lastSyncTime = time.Now()
+				n.syncMu.Unlock()
+				if n.onSyncComplete != nil {
+					n.onSyncComplete()
+				}
 			}
 		}(pi)
-	}
-
-	wg.Wait()
-
-	n.syncMu.Lock()
-	n.lastSyncTime = time.Now()
-	n.syncMu.Unlock()
-
-	// Notify the connector to rebuild in-memory state from new entries
-	if synced && n.onSyncComplete != nil {
-		n.onSyncComplete()
 	}
 }
 

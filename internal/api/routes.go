@@ -95,17 +95,36 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	agents := s.conn.Registry().All()
+	myKey := fmt.Sprintf("%x", s.conn.KeyPair().Public)
 
 	result := make([]map[string]any, 0, len(agents))
+	selfFound := false
 	for _, a := range agents {
+		keyHex := fmt.Sprintf("%x", a.PublicKey)
+		if keyHex == myKey {
+			selfFound = true
+		}
 		result = append(result, map[string]any{
-			"public_key":       fmt.Sprintf("%x", a.PublicKey),
+			"public_key":       keyHex,
 			"display_name":     a.DisplayName,
 			"platform":         a.Platform,
 			"platform_user_id": a.PlatformUserID,
 			"title":            a.Title,
 			"team":             a.Team,
 			"revoked":          a.Revoked,
+		})
+	}
+
+	// Ensure our own agent is always included
+	if !selfFound {
+		result = append(result, map[string]any{
+			"public_key":       myKey,
+			"display_name":     "",
+			"platform":         "",
+			"platform_user_id": "",
+			"title":            "",
+			"team":             "",
+			"revoked":          false,
 		})
 	}
 

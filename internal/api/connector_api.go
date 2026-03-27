@@ -551,7 +551,11 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 	case "public", "":
 		ch, err = channel.CreatePublicChannel(s.conn.Channels(), req.Name, req.Description, kp.Public)
 	case "private":
-		ch, _, err = channel.CreatePrivateChannel(s.conn.Channels(), req.Name, req.Description, kp.Public)
+		var groupKey [32]byte
+		ch, groupKey, err = channel.CreatePrivateChannel(s.conn.Channels(), req.Name, req.Description, kp.Public)
+		if err == nil {
+			s.conn.KeyDB().SetGroupKey(ch.ID, 0, groupKey[:])
+		}
 	default:
 		writeError(w, r, merrors.New("channel.create.invalid_type", merrors.Fatal,
 			"Channel type must be 'public' or 'private'.", nil), 400)
