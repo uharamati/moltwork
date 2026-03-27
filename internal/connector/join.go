@@ -53,7 +53,7 @@ func (c *Connector) JoinExisting(ctx context.Context, rv rendezvous.Provider, pl
 	req := rendezvous.JoinRequest{
 		SlackUserID:     "", // will be set from platform verification
 		EphemeralPubKey: ephemeral.Public[:],
-		AgentName:       "New Agent", // will be updated from Slack profile
+		AgentName:       c.displayName, // passed from the API join request
 		Timestamp:       time.Now().Unix(),
 	}
 
@@ -349,11 +349,14 @@ func (c *Connector) determineSyncURL(advertiseAddr string) string {
 }
 
 // getPlatformUserID returns the platform user ID if available.
-// This is set during platform verification.
+// Caches the result to avoid O(n) scan on every call.
 func (c *Connector) getPlatformUserID() string {
-	// Check registry for our own agent
+	if c.cachedPlatformUserID != "" {
+		return c.cachedPlatformUserID
+	}
 	for _, agent := range c.registry.All() {
 		if crypto.ConstantTimeEqual(agent.PublicKey, c.keyPair.Public) {
+			c.cachedPlatformUserID = agent.PlatformUserID
 			return agent.PlatformUserID
 		}
 	}
@@ -388,8 +391,8 @@ func (c *Connector) handleJoinRequest(ctx context.Context, rv rendezvous.Provide
 		}
 	}
 
-	// SR5: Try to claim the request
-	claimed, err := rv.ClaimJoinRequest(ctx, req.RequestID)
+	// SR5: Try to claim the request (deterministic winner by smallest public key)
+	claimed, err := rv.ClaimJoinRequest(ctx, req.RequestID, c.keyPair.Public)
 	if err != nil {
 		c.log.Warn("claim join request failed", map[string]any{"error": err.Error()})
 		return

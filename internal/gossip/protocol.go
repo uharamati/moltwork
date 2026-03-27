@@ -178,7 +178,26 @@ func HandleIncomingSync(s network.Stream, logDB *store.LogDB, psk []byte, valida
 		}
 	}
 
-	if len(toSend) > 0 {
+	// Compute what they need
+	ourSet := hashSetToMap(ourHashes)
+	theyNeed := len(toSend) > 0
+	// Check if we need anything from them
+	weNeed := false
+	for _, h := range theirHashes.Hashes {
+		if !ourSet[hashToArray(h)] {
+			weNeed = true
+			break
+		}
+	}
+
+	// Fast path: if neither side has anything to exchange, close early
+	// to avoid the i/o deadline noise that fires every sync cycle
+	if !theyNeed && !weNeed {
+		writeMsg(s, MsgTypeDone, nil)
+		return
+	}
+
+	if theyNeed {
 		entriesMsg := EntriesMsg{Entries: toSend}
 		entriesBytes, err := moltcbor.Marshal(entriesMsg)
 		if err != nil {
@@ -250,21 +269,9 @@ func InitiateSync(s network.Stream, logDB *store.LogDB, psk []byte, validator Ag
 		return fmt.Errorf("peer sent oversized hash set: %d entries", len(theirHashes.Hashes))
 	}
 
-	// Step 4: Receive entries they're sending us
-	msgType, payload, err = readMsg(s)
-	if err != nil {
-		return fmt.Errorf("read entries: %w", err)
-	}
-	if msgType == MsgTypeEntries {
-		var incoming EntriesMsg
-		if err := moltcbor.Unmarshal(payload, &incoming); err != nil {
-			return fmt.Errorf("decode entries: %w", err)
-		}
-		StoreEntries(logDB, incoming.Entries, validator, log)
-	}
-
-	// Step 5: Send entries they need
+	// Step 4: Compute what they need
 	theirSet := hashSetToMap(theirHashes.Hashes)
+	ourSet := hashSetToMap(ourHashes)
 	var toSend []RawSyncEntry
 	for _, h := range ourHashes {
 		hashArr := hashToArray(h)
@@ -285,7 +292,37 @@ func InitiateSync(s network.Stream, logDB *store.LogDB, psk []byte, validator Ag
 		}
 	}
 
-	if len(toSend) > 0 {
+	// Check if we need anything from them
+	weNeed := false
+	for _, h := range theirHashes.Hashes {
+		if !ourSet[hashToArray(h)] {
+			weNeed = true
+			break
+		}
+	}
+	theyNeed := len(toSend) > 0
+
+	// Fast path: nothing to exchange
+	if !theyNeed && !weNeed {
+		writeMsg(s, MsgTypeDone, nil)
+		return nil
+	}
+
+	// Step 5: Receive entries they're sending us
+	msgType, payload, err = readMsg(s)
+	if err != nil {
+		return fmt.Errorf("read entries: %w", err)
+	}
+	if msgType == MsgTypeEntries {
+		var incoming EntriesMsg
+		if err := moltcbor.Unmarshal(payload, &incoming); err != nil {
+			return fmt.Errorf("decode entries: %w", err)
+		}
+		StoreEntries(logDB, incoming.Entries, validator, log)
+	}
+
+	// Step 6: Send entries they need
+	if theyNeed {
 		entriesMsg := EntriesMsg{Entries: toSend}
 		entriesBytes, err := moltcbor.Marshal(entriesMsg)
 		if err != nil {
@@ -300,10 +337,41 @@ func InitiateSync(s network.Stream, logDB *store.LogDB, psk []byte, validator Ag
 	return nil
 }
 
+// isZeroPSK checks if the PSK is all zeros (placeholder before real PSK is set).
+func isZeroPSK(psk []byte) bool {
+	for _, b := range psk {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// sessionBinding computes a deterministic session ID from both peer IDs.
+// Both sides derive the same value regardless of who initiated.
+func sessionBinding(s network.Stream) []byte {
+	local := []byte(s.Conn().LocalPeer().String())
+	remote := []byte(s.Conn().RemotePeer().String())
+	// Deterministic order: smaller peer ID first
+	if string(local) > string(remote) {
+		local, remote = remote, local
+	}
+	combined := append(local, remote...)
+	h := crypto.Hash(combined)
+	return h[:]
+}
+
 // authenticateOutgoing sends PSK proof as initiator.
+// Proof includes session binding via both peer IDs to prevent cross-session replay.
 func authenticateOutgoing(s network.Stream, psk []byte) error {
+	if len(psk) == 0 || isZeroPSK(psk) {
+		return fmt.Errorf("cannot authenticate with zero-valued PSK")
+	}
 	challenge := crypto.RandomBytes(32)
-	proof := crypto.Hash(append(psk, challenge...))
+	binding := sessionBinding(s)
+	proofInput := append(psk, challenge...)
+	proofInput = append(proofInput, binding...)
+	proof := crypto.Hash(proofInput)
 
 	msg := PSKProofMsg{Challenge: challenge, Proof: proof[:]}
 	data, err := moltcbor.Marshal(msg)
@@ -325,7 +393,10 @@ func authenticateOutgoing(s network.Stream, psk []byte) error {
 		return fmt.Errorf("decode PSK proof: %w", err)
 	}
 
-	expected := crypto.Hash(append(psk, peerProof.Challenge...))
+	// Verify with same session binding
+	verifyInput := append(psk, peerProof.Challenge...)
+	verifyInput = append(verifyInput, binding...)
+	expected := crypto.Hash(verifyInput)
 	if !crypto.ConstantTimeEqual(expected[:], peerProof.Proof) {
 		return fmt.Errorf("PSK proof verification failed")
 	}
@@ -334,7 +405,11 @@ func authenticateOutgoing(s network.Stream, psk []byte) error {
 }
 
 // authenticateIncoming handles PSK proof as responder.
+// Proof includes session binding via both peer IDs to prevent cross-session replay.
 func authenticateIncoming(s network.Stream, psk []byte) error {
+	if len(psk) == 0 || isZeroPSK(psk) {
+		return fmt.Errorf("cannot authenticate with zero-valued PSK")
+	}
 	// Read initiator's proof
 	msgType, payload, err := readMsg(s)
 	if err != nil || msgType != MsgTypePSKProof {
@@ -346,14 +421,20 @@ func authenticateIncoming(s network.Stream, psk []byte) error {
 		return fmt.Errorf("decode PSK proof: %w", err)
 	}
 
-	expected := crypto.Hash(append(psk, peerProof.Challenge...))
+	// Verify with session binding
+	binding := sessionBinding(s)
+	verifyInput := append(psk, peerProof.Challenge...)
+	verifyInput = append(verifyInput, binding...)
+	expected := crypto.Hash(verifyInput)
 	if !crypto.ConstantTimeEqual(expected[:], peerProof.Proof) {
 		return fmt.Errorf("PSK proof verification failed")
 	}
 
-	// Send our proof
+	// Send our proof with session binding
 	challenge := crypto.RandomBytes(32)
-	proof := crypto.Hash(append(psk, challenge...))
+	proofInput := append(psk, challenge...)
+	proofInput = append(proofInput, binding...)
+	proof := crypto.Hash(proofInput)
 	msg := PSKProofMsg{Challenge: challenge, Proof: proof[:]}
 	data, err := moltcbor.Marshal(msg)
 	if err != nil {

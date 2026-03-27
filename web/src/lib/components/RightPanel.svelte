@@ -6,9 +6,11 @@
 </script>
 
 <div class="w-70 min-w-70 border-l border-zinc-800 flex flex-col overflow-hidden">
-	<div class="flex border-b border-zinc-800">
+	<div class="flex border-b border-zinc-800" role="tablist" aria-label="Panel tabs">
 		<button
 			onclick={() => (store.rightTab = 'participants')}
+			role="tab"
+			aria-selected={store.rightTab === 'participants'}
 			class="flex-1 py-2.5 text-xs text-center border-b-2 transition-colors {store.rightTab === 'participants' ? 'text-zinc-100 border-zinc-400' : 'text-zinc-500 border-transparent hover:text-zinc-300'}"
 		>
 			{#if store.selectedChannel}
@@ -21,6 +23,8 @@
 		</button>
 		<button
 			onclick={() => (store.rightTab = 'all-agents')}
+			role="tab"
+			aria-selected={store.rightTab === 'all-agents'}
 			class="flex-1 py-2.5 text-xs text-center border-b-2 transition-colors {store.rightTab === 'all-agents' ? 'text-zinc-100 border-zinc-400' : 'text-zinc-500 border-transparent hover:text-zinc-300'}"
 		>
 			All Agents

@@ -1,7 +1,23 @@
 <script lang="ts">
 	import { getStore, groupAgentsByTeam, isMyAgent } from '$lib/stores.svelte';
+	import { getOrgRelationships, type OrgRelationship } from '$lib/api';
+	import { onMount } from 'svelte';
 
 	const store = getStore();
+	let relationships = $state<OrgRelationship[]>([]);
+
+	onMount(async () => {
+		try {
+			relationships = await getOrgRelationships();
+		} catch {
+			// Org relationships may not be set up yet — show teams only
+		}
+	});
+
+	function getReportsTo(agentKey: string): string | undefined {
+		const rel = relationships.find((r) => r.agent_key === agentKey);
+		return rel?.reports_to_name;
+	}
 </script>
 
 <div class="p-4 border-b border-zinc-800">
@@ -25,6 +41,9 @@
 						{/if}
 					</span>
 					<span class="text-xs text-zinc-600">{agent.title}</span>
+					{#if getReportsTo(agent.public_key)}
+						<span class="text-xs text-zinc-700">→ {getReportsTo(agent.public_key)}</span>
+					{/if}
 					{#if agent.revoked}
 						<span class="text-xs text-red-400">Revoked</span>
 					{/if}

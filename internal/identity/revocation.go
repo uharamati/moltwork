@@ -141,6 +141,9 @@ func revocationSignData(revokedKeyHash []byte, timestamp int64, reason moltcbor.
 		Timestamp: timestamp,
 		Reason:    uint8(reason),
 	}
-	encoded, _ := moltcbor.Marshal(data)
+	encoded, err := moltcbor.Marshal(data)
+	if err != nil {
+		panic("revocationSignData: marshal failed: " + err.Error())
+	}
 	return encoded
 }

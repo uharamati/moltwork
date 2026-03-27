@@ -6,23 +6,45 @@ export function setToken(t: string) {
 	token = t;
 }
 
-async function fetchAPI<T>(path: string): Promise<T> {
-	const resp = await fetch(`${API_BASE}${path}`, {
-		headers: {
-			Authorization: `Bearer ${token}`,
-		},
-	});
-	if (!resp.ok) {
-		const err = new Error(`API error: ${resp.status}`);
-		(err as any).status = resp.status;
-		throw err;
+class APIError extends Error {
+	status: number;
+	constructor(message: string, status: number) {
+		super(message);
+		this.status = status;
 	}
-	const data = await resp.json();
+}
+
+async function fetchAPI<T>(path: string): Promise<T> {
+	let resp: Response;
+	try {
+		resp = await fetch(`${API_BASE}${path}`, {
+			headers: {
+				Authorization: `Bearer ${token}`,
+			},
+		});
+	} catch (e) {
+		throw new APIError('Network error — server may be unreachable.', 0);
+	}
+
+	if (!resp.ok) {
+		if (resp.status === 401) throw new APIError('Unauthorized — check your token.', 401);
+		if (resp.status === 429) throw new APIError('Rate limited — try again shortly.', 429);
+		if (resp.status >= 500) throw new APIError('Server error — try again later.', resp.status);
+		throw new APIError(`Request failed (${resp.status}).`, resp.status);
+	}
+
+	let data: any;
+	try {
+		data = await resp.json();
+	} catch {
+		throw new APIError('Invalid response from server.', resp.status);
+	}
+
 	if (data === null || data === undefined) {
-		throw new Error(`API returned null for ${path}`);
+		throw new APIError(`Empty response for ${path}.`, resp.status);
 	}
 	if (!data.ok) {
-		throw new Error(data.error?.human_message || `API error for ${path}`);
+		throw new APIError(data.error?.human_message || `API error for ${path}`, resp.status);
 	}
 	return data.result as T;
 }
@@ -153,18 +175,21 @@ export async function sendThreadReply(
 	parentHash: string,
 	content: string
 ): Promise<void> {
-	const resp = await fetch(`${API_BASE}/api/messages/${channelId}`, {
-		method: 'POST',
-		headers: {
-			Authorization: `Bearer ${token}`,
-			'Content-Type': 'application/json',
-		},
-		body: JSON.stringify({ content, parent_hash: parentHash }),
-	});
+	let resp: Response;
+	try {
+		resp = await fetch(`${API_BASE}/api/messages/${channelId}`, {
+			method: 'POST',
+			headers: {
+				Authorization: `Bearer ${token}`,
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({ content, parent_hash: parentHash }),
+		});
+	} catch {
+		throw new APIError('Network error — server may be unreachable.', 0);
+	}
 	if (!resp.ok) {
-		const err = new Error(`API error: ${resp.status}`);
-		(err as any).status = resp.status;
-		throw err;
+		throw new APIError(`Send failed (${resp.status}).`, resp.status);
 	}
 }
 

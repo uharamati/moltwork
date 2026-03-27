@@ -3,10 +3,12 @@ package dag
 import (
 	"bytes"
 	"fmt"
+	"sync"
 )
 
 // DAG is an in-memory directed acyclic graph of log entries.
 type DAG struct {
+	mu       sync.RWMutex
 	entries  map[[32]byte]*SignedEntry
 	children map[[32]byte][][32]byte // parent -> children
 	roots    [][32]byte              // entries with no parents
@@ -22,25 +24,32 @@ func New() *DAG {
 
 // Has checks if an entry exists in the DAG.
 func (d *DAG) Has(hash [32]byte) bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	_, ok := d.entries[hash]
 	return ok
 }
 
 // Get retrieves an entry by hash.
 func (d *DAG) Get(hash [32]byte) *SignedEntry {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	return d.entries[hash]
 }
 
 // Insert adds an entry to the DAG.
 // Returns error if any parent is missing (rule D4: parents must exist).
 func (d *DAG) Insert(entry *SignedEntry) error {
-	if d.Has(entry.Hash) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if _, ok := d.entries[entry.Hash]; ok {
 		return nil // idempotent
 	}
 
 	// Validate all parents exist (rule D4)
 	for _, parent := range entry.Parents {
-		if !d.Has(parent) {
+		if _, ok := d.entries[parent]; !ok {
 			return fmt.Errorf("missing parent %x", parent[:8])
 		}
 	}
@@ -58,9 +67,18 @@ func (d *DAG) Insert(entry *SignedEntry) error {
 	return nil
 }
 
+// has is the lock-free internal version for use under an existing lock.
+func (d *DAG) has(hash [32]byte) bool {
+	_, ok := d.entries[hash]
+	return ok
+}
+
 // InsertBatch inserts multiple entries, resolving intra-batch dependencies.
 // Entries may reference parents within the same batch.
 func (d *DAG) InsertBatch(entries []*SignedEntry) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	// Build index of batch entries
 	batchIndex := make(map[[32]byte]*SignedEntry, len(entries))
 	for _, e := range entries {
@@ -73,16 +91,29 @@ func (d *DAG) InsertBatch(entries []*SignedEntry) error {
 		return err
 	}
 
-	// Insert in topological order
-	for _, e := range sorted {
-		if err := d.Insert(e); err != nil {
-			return fmt.Errorf("insert batch entry %x: %w", e.Hash[:8], err)
+	// Insert in topological order (inline to avoid double-locking)
+	for _, entry := range sorted {
+		if d.has(entry.Hash) {
+			continue
+		}
+		for _, parent := range entry.Parents {
+			if !d.has(parent) {
+				return fmt.Errorf("insert batch entry %x: missing parent %x", entry.Hash[:8], parent[:8])
+			}
+		}
+		d.entries[entry.Hash] = entry
+		if len(entry.Parents) == 0 {
+			d.roots = append(d.roots, entry.Hash)
+		}
+		for _, parent := range entry.Parents {
+			d.children[parent] = append(d.children[parent], entry.Hash)
 		}
 	}
 	return nil
 }
 
 // topoSortBatch sorts batch entries respecting intra-batch dependencies.
+// Caller must hold the DAG lock (uses has() directly to avoid deadlock).
 func topoSortBatch(entries []*SignedEntry, batchIndex map[[32]byte]*SignedEntry, existing *DAG) ([]*SignedEntry, error) {
 	inDegree := make(map[[32]byte]int)
 	for _, e := range entries {
@@ -94,7 +125,7 @@ func topoSortBatch(entries []*SignedEntry, batchIndex map[[32]byte]*SignedEntry,
 		for _, parent := range e.Parents {
 			if _, inBatch := batchIndex[parent]; inBatch {
 				inDegree[e.Hash]++
-			} else if !existing.Has(parent) {
+			} else if !existing.has(parent) {
 				return nil, fmt.Errorf("entry %x references unknown parent %x", e.Hash[:8], parent[:8])
 			}
 		}
@@ -137,11 +168,15 @@ func topoSortBatch(entries []*SignedEntry, batchIndex map[[32]byte]*SignedEntry,
 
 // Len returns the number of entries in the DAG.
 func (d *DAG) Len() int {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	return len(d.entries)
 }
 
 // Entries returns all entries (unordered).
 func (d *DAG) Entries() []*SignedEntry {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	result := make([]*SignedEntry, 0, len(d.entries))
 	for _, e := range d.entries {
 		result = append(result, e)
@@ -151,11 +186,15 @@ func (d *DAG) Entries() []*SignedEntry {
 
 // Roots returns entries with no parents.
 func (d *DAG) Roots() [][32]byte {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	return d.roots
 }
 
 // Tips returns entries with no children (the frontier).
 func (d *DAG) Tips() [][32]byte {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	var tips [][32]byte
 	for hash := range d.entries {
 		if len(d.children[hash]) == 0 {

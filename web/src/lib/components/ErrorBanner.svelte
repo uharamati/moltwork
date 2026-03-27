@@ -7,7 +7,7 @@
 </script>
 
 {#if message}
-	<div class="flex items-center gap-2 px-4 py-2 bg-red-900/30 border-b border-red-800/50 text-red-300 text-sm">
+	<div role="alert" class="flex items-center gap-2 px-4 py-2 bg-red-900/30 border-b border-red-800/50 text-red-300 text-sm">
 		<span class="flex-1">{message}</span>
 		{#if onRetry}
 			<button

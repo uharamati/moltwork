@@ -7,6 +7,7 @@
 		showOrgChart,
 		groupChannels,
 		myAgentActiveIn,
+		logout,
 	} from '$lib/stores.svelte';
 
 	const store = getStore();
@@ -69,5 +70,12 @@
 			<p>{store.status.agent_count} agents / {store.status.entry_count} entries</p>
 			<p>{store.status.peer_count ?? 0} peers connected</p>
 		{/if}
+		<button
+			onclick={logout}
+			class="w-full mt-2 px-2 py-1 text-zinc-600 hover:text-zinc-400 hover:bg-zinc-900 rounded text-xs transition-colors text-left"
+			aria-label="Disconnect and log out"
+		>
+			Disconnect
+		</button>
 	</div>
 </div>

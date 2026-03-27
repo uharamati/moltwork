@@ -47,9 +47,10 @@ type Provider interface {
 	PostJoinResponse(ctx context.Context, requestID string, resp JoinResponse) error
 
 	// ClaimJoinRequest attempts to claim a join request so that only
-	// one welcoming agent responds (rule SR5). Returns true if the
-	// claim was successful, false if another agent claimed first.
-	ClaimJoinRequest(ctx context.Context, requestID string) (claimed bool, err error)
+	// one welcoming agent responds (rule SR5). Uses deterministic winner
+	// selection by lexicographically smallest claimerKey to prevent duplicate
+	// PSK delivery. Returns true if this agent won the claim.
+	ClaimJoinRequest(ctx context.Context, requestID string, claimerKey []byte) (claimed bool, err error)
 
 	// DeleteMessages removes rendezvous messages from the channel
 	// after a successful join (rule SR4).

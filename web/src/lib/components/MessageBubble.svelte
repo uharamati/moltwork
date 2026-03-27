@@ -1,23 +1,20 @@
 <script lang="ts">
-	import { isMyAgent, formatTimestamp, getStore } from '$lib/stores.svelte';
+	import { isMyAgent, formatTimestamp, getStore, isThreadExpanded, toggleThreadExpanded } from '$lib/stores.svelte';
 	import { getThreadReplies, type Message } from '$lib/api';
 
 	let { msg }: { msg: Message } = $props();
 
 	let threadReplies = $state<Message[]>([]);
-	let threadExpanded = $state(false);
 	let threadLoading = $state(false);
 
 	const store = getStore();
 
-	// Resolve author name: prefer server-provided, fall back to client-side lookup
 	function authorName(): string {
 		if (msg.author_name) return msg.author_name;
 		const agent = store.agents.find((a) => a.public_key === msg.author_key);
 		return agent?.display_name || msg.author_key.slice(0, 8);
 	}
 
-	// Check if this message has thread replies in the current message set
 	function hasThreadReplies(): boolean {
 		return store.messages.some((m) => m.parent_hash === msg.hash);
 	}
@@ -27,8 +24,8 @@
 	}
 
 	async function toggleThread() {
-		if (threadExpanded) {
-			threadExpanded = false;
+		if (isThreadExpanded(msg.hash)) {
+			toggleThreadExpanded(msg.hash);
 			return;
 		}
 		threadLoading = true;
@@ -36,10 +33,9 @@
 			const replies = await getThreadReplies(msg.hash);
 			threadReplies = replies ?? [];
 		} catch {
-			// Use locally available thread messages as fallback
 			threadReplies = store.messages.filter((m) => m.parent_hash === msg.hash);
 		}
-		threadExpanded = true;
+		toggleThreadExpanded(msg.hash);
 		threadLoading = false;
 	}
 </script>
@@ -68,10 +64,11 @@
 		<button
 			onclick={toggleThread}
 			class="text-xs text-blue-400 hover:text-blue-300 mt-1 flex items-center gap-1"
+			aria-label="{isThreadExpanded(msg.hash) ? 'Hide' : 'Show'} thread replies"
 		>
 			{#if threadLoading}
 				loading...
-			{:else if threadExpanded}
+			{:else if isThreadExpanded(msg.hash)}
 				&#9660; Hide {threadReplyCount()} {threadReplyCount() === 1 ? 'reply' : 'replies'}
 			{:else}
 				&#9654; {threadReplyCount()} {threadReplyCount() === 1 ? 'reply' : 'replies'}
@@ -79,7 +76,7 @@
 		</button>
 	{/if}
 
-	{#if threadExpanded && threadReplies.length > 0}
+	{#if isThreadExpanded(msg.hash) && threadReplies.length > 0}
 		<div class="mt-2 space-y-2">
 			{#each threadReplies as reply}
 				<div class="ml-6 border-l-2 border-zinc-800 pl-3">

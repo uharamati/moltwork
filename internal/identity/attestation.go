@@ -22,9 +22,10 @@ type AttestationLoop struct {
 	log      *logging.Logger
 	interval time.Duration
 
-	mu           sync.RWMutex
-	lastVerified time.Time
-	lastValid    bool
+	mu              sync.RWMutex
+	lastVerified    time.Time
+	lastValid       bool
+	consecutiveFail int
 }
 
 // NewAttestationLoop creates an attestation loop.
@@ -68,23 +69,48 @@ func (al *AttestationLoop) Run(ctx context.Context) {
 }
 
 func (al *AttestationLoop) attest(ctx context.Context) {
+	// Exponential backoff on persistent failures: skip attestation if
+	// we've failed recently and haven't waited long enough.
+	al.mu.RLock()
+	fails := al.consecutiveFail
+	al.mu.RUnlock()
+	if fails > 0 {
+		backoff := time.Duration(1<<min(fails, 6)) * time.Minute // 1m, 2m, 4m, 8m, 16m, 32m, 64m cap
+		if time.Since(al.lastVerified) < backoff {
+			return
+		}
+	}
+
 	identity, err := al.verifier.Verify(ctx, al.token)
 	now := time.Now()
 
 	al.mu.Lock()
 	al.lastVerified = now
 	al.lastValid = err == nil
+	if err != nil {
+		al.consecutiveFail++
+	} else {
+		al.consecutiveFail = 0
+	}
 	al.mu.Unlock()
 
 	if err != nil {
 		al.log.Warn("attestation failed, publishing token-invalid status", map[string]any{
-			"error": err.Error(),
+			"error":       err.Error(),
+			"fail_streak": al.consecutiveFail,
 		})
 		al.publishTokenStatus(false, err.Error())
 		return
 	}
 
 	al.publishAttestation(identity)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // LastVerified returns the time and result of the last verification attempt.

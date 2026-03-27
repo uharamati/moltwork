@@ -17,6 +17,21 @@ func bootstrap(c *Connector, platform, workspaceDomain string) error {
 		"domain":   workspaceDomain,
 	})
 
+	// Verify bot token is valid BEFORE writing anything.
+	// If bootstrap partially completes (trust boundary written) but rendezvous
+	// fails, on restart the agent thinks it's bootstrapped but the Slack channel
+	// may not exist. Verify first to fail fast.
+	if platform == "slack" {
+		token, _, _, err := c.keyDB.GetPlatformToken()
+		if err == nil && token != nil {
+			verifier := identity.NewSlackVerifier()
+			if _, err := verifier.Verify(c.ctx, string(token)); err != nil {
+				return fmt.Errorf("bot token verification failed — aborting bootstrap: %w", err)
+			}
+			c.log.Info("bot token verified successfully")
+		}
+	}
+
 	// Generate PSK — only the bootstrap agent does this
 	psk := crypto.RandomBytes(32)
 	if err := c.keyDB.SetPSK(psk); err != nil {

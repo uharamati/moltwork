@@ -5,6 +5,8 @@ import "bytes"
 // TopologicalOrder returns all entries in causal order.
 // Concurrent entries (no ancestry relationship) are ordered by hash (rule D3).
 func (d *DAG) TopologicalOrder() []*SignedEntry {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	inDegree := make(map[[32]byte]int, len(d.entries))
 	for hash := range d.entries {
 		inDegree[hash] = 0
@@ -47,6 +49,8 @@ func (d *DAG) TopologicalOrder() []*SignedEntry {
 
 // IsAncestor checks if `ancestor` is an ancestor of `descendant` in the DAG.
 func (d *DAG) IsAncestor(ancestor, descendant [32]byte) bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	if ancestor == descendant {
 		return false
 	}
@@ -79,7 +83,11 @@ func (d *DAG) isAncestorDFS(target, current [32]byte, visited map[[32]byte]bool)
 
 // AreConcurrent returns true if neither entry is an ancestor of the other.
 func (d *DAG) AreConcurrent(a, b [32]byte) bool {
-	return !d.IsAncestor(a, b) && !d.IsAncestor(b, a) && a != b
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	visited1 := make(map[[32]byte]bool)
+	visited2 := make(map[[32]byte]bool)
+	return !d.isAncestorDFS(a, b, visited1) && !d.isAncestorDFS(b, a, visited2) && a != b
 }
 
 // CompareHashes provides deterministic ordering for concurrent entries (rule D3).

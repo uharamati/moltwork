@@ -40,9 +40,26 @@ func (s *SlackProvider) ChannelID() string {
 	return s.channelID
 }
 
+// SetCachedChannelID pre-sets the channel ID from a cache, skipping findChannel.
+// Call this before WorkspaceExists to avoid full channel scan on large workspaces.
+func (s *SlackProvider) SetCachedChannelID(id string) {
+	s.channelID = id
+}
+
 // WorkspaceExists checks if #moltwork-agents exists as a public channel.
 // Uses conversations.list with types=public_channel (requires channels:read).
+// If SetCachedChannelID was called, verifies the cached ID via conversations.info
+// instead of scanning all channels.
 func (s *SlackProvider) WorkspaceExists(ctx context.Context) (bool, error) {
+	// Fast path: verify cached channel ID
+	if s.channelID != "" {
+		if s.verifyChannelID(ctx, s.channelID) {
+			return true, nil
+		}
+		// Cache was stale, fall through to full scan
+		s.channelID = ""
+	}
+
 	id, err := s.findChannel(ctx)
 	if err != nil {
 		return false, err
@@ -52,6 +69,33 @@ func (s *SlackProvider) WorkspaceExists(ctx context.Context) (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+// verifyChannelID checks if a cached channel ID is still valid via conversations.info.
+func (s *SlackProvider) verifyChannelID(ctx context.Context, channelID string) bool {
+	client := &http.Client{Timeout: apiTimeout}
+	req, err := http.NewRequestWithContext(ctx, "GET",
+		fmt.Sprintf("https://slack.com/api/conversations.info?channel=%s", channelID), nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+s.token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var result struct {
+		OK      bool `json:"ok"`
+		Channel struct {
+			Name string `json:"name"`
+		} `json:"channel"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return false
+	}
+	return result.OK && result.Channel.Name == channelName
 }
 
 // PostGossipAddress posts a rendezvous message with this node's gossip address.
@@ -155,10 +199,12 @@ func (s *SlackProvider) WatchForJoinRequests(ctx context.Context) (<-chan JoinRe
 	ch := make(chan JoinRequest, 10)
 	go func() {
 		defer close(ch)
-		// Track which messages we've already seen
+		// Track which messages we've already seen. Pruned periodically
+		// to prevent unbounded memory growth in long-running agents.
 		seen := make(map[string]bool)
 		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
+		pruneCounter := 0
 
 		for {
 			select {
@@ -170,7 +216,11 @@ func (s *SlackProvider) WatchForJoinRequests(ctx context.Context) (<-chan JoinRe
 					s.log.Warn("poll for join requests failed", map[string]any{"error": err.Error()})
 					continue
 				}
+
+				// Build set of currently visible message TSs
+				currentTSs := make(map[string]bool, len(messages))
 				for _, msg := range messages {
+					currentTSs[msg.TS] = true
 					if seen[msg.TS] {
 						continue
 					}
@@ -181,6 +231,17 @@ func (s *SlackProvider) WatchForJoinRequests(ctx context.Context) (<-chan JoinRe
 						case ch <- *req:
 						case <-ctx.Done():
 							return
+						}
+					}
+				}
+
+				// Prune seen entries no longer in history every 100 polls (~8 min)
+				pruneCounter++
+				if pruneCounter >= 100 {
+					pruneCounter = 0
+					for ts := range seen {
+						if !currentTSs[ts] {
+							delete(seen, ts)
 						}
 					}
 				}
@@ -198,8 +259,10 @@ func (s *SlackProvider) PostJoinResponse(ctx context.Context, requestID string, 
 }
 
 // ClaimJoinRequest posts a claim reply in the join request thread (rule SR5).
-// Returns true if we successfully claimed (no prior claim exists).
-func (s *SlackProvider) ClaimJoinRequest(ctx context.Context, requestID string) (bool, error) {
+// Uses deterministic winner selection: all claimers include their Ed25519
+// public key, and the lexicographically smallest key wins. This prevents
+// duplicate PSK delivery which can cause cascading pairwise secret corruption.
+func (s *SlackProvider) ClaimJoinRequest(ctx context.Context, requestID string, claimerKey []byte) (bool, error) {
 	// Check if someone already claimed this request
 	replies, err := s.readReplies(ctx, s.channelID, requestID)
 	if err != nil {
@@ -211,37 +274,41 @@ func (s *SlackProvider) ClaimJoinRequest(ctx context.Context, requestID string) 
 		}
 	}
 
-	// Post our claim
-	claimText := FormatClaim(nil) // claimer key set by caller if needed
+	// Post our claim with our public key for deterministic winner selection
+	claimText := FormatClaim(claimerKey)
 	_, err = s.postMessage(ctx, s.channelID, claimText, requestID)
 	if err != nil {
 		return false, err
 	}
 
-	// Brief pause to check for race conditions — another agent may have
-	// posted a claim at the same time
-	time.Sleep(2 * time.Second)
+	// Extended pause to allow concurrent claims to settle.
+	// Slack API latency means claims posted "at the same time" may appear
+	// with different timestamps. 4 seconds accounts for typical API jitter.
+	time.Sleep(4 * time.Second)
 
-	// Re-read replies and check if our claim is the earliest
+	// Re-read replies and determine the deterministic winner
 	replies, err = s.readReplies(ctx, s.channelID, requestID)
 	if err != nil {
 		return true, nil // Assume we won if we can't check
 	}
 
-	var firstClaimTS string
+	// Collect all claim public keys and find deterministic winner
+	var smallestKey []byte
 	for _, reply := range replies {
-		if ParseClaim(reply.Text) != nil {
-			if firstClaimTS == "" || reply.TS < firstClaimTS {
-				firstClaimTS = reply.TS
-			}
+		claim := ParseClaim(reply.Text)
+		if claim == nil || len(claim.ClaimerKey) == 0 {
+			continue
+		}
+		if smallestKey == nil || comparePubKeys(claim.ClaimerKey, smallestKey) < 0 {
+			smallestKey = claim.ClaimerKey
 		}
 	}
 
-	// We don't track our own TS here, so we check if there's exactly
-	// one claim (ours) or if ours is earliest. For simplicity, if we
-	// posted successfully and there's at most one other claim, proceed.
-	// The worst case is duplicate PSK delivery, which is harmless.
-	return true, nil
+	// We win if our key is the lexicographically smallest
+	if smallestKey == nil {
+		return true, nil // no valid claims found, we proceed
+	}
+	return comparePubKeys(claimerKey, smallestKey) == 0, nil
 }
 
 // DeleteMessages deletes messages from the channel (rule SR4).
@@ -366,7 +433,7 @@ func (s *SlackProvider) readHistory(ctx context.Context, channelID string) ([]sl
 	client := &http.Client{Timeout: apiTimeout}
 
 	req, err := http.NewRequestWithContext(ctx, "GET",
-		fmt.Sprintf("https://slack.com/api/conversations.history?channel=%s&limit=100", channelID), nil)
+		fmt.Sprintf("https://slack.com/api/conversations.history?channel=%s&limit=200", channelID), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -508,4 +575,23 @@ func (s *SlackProvider) deleteMessage(ctx context.Context, channelID, ts string)
 		return fmt.Errorf("rendezvous.delete.failed: %s", result.Error)
 	}
 	return nil
+}
+
+// comparePubKeys compares two public keys lexicographically.
+func comparePubKeys(a, b []byte) int {
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if a[i] < b[i] {
+			return -1
+		}
+		if a[i] > b[i] {
+			return 1
+		}
+	}
+	if len(a) < len(b) {
+		return -1
+	}
+	if len(a) > len(b) {
+		return 1
+	}
+	return 0
 }

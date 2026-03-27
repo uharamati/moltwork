@@ -89,11 +89,19 @@ func (r *Registry) LoadFromDB(logDB *store.LogDB) error {
 	return nil
 }
 
+// maxAgents is the hard limit on registry size to prevent memory exhaustion.
+const maxAgents = 10000
+
 // Register adds an agent to the registry.
 // Returns error if an agent with the same platform user ID already exists (Sybil prevention).
 func (r *Registry) Register(agent *Agent) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// Prevent unbounded growth
+	if len(r.byKey) >= maxAgents {
+		return fmt.Errorf("agent registry full (%d agents)", maxAgents)
+	}
 
 	platKey := platformKey(agent.Platform, agent.PlatformUserID)
 

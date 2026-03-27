@@ -38,7 +38,7 @@
 			{#if store.messages.length === 0}
 				<p class="text-zinc-600 text-sm">No messages yet.</p>
 			{:else}
-				{#each store.messages as msg}
+				{#each store.messages.filter(m => !m.is_thread) as msg}
 					<MessageBubble {msg} />
 				{/each}
 			{/if}

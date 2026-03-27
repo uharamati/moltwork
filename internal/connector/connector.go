@@ -47,6 +47,9 @@ type Connector struct {
 
 	pairwiseMu   sync.Mutex // protects EstablishPairwiseSecrets
 	syncPeerURLs []string   // HTTP sync peer URLs (from config + rendezvous)
+	syncRebuild  chan struct{} // debounce channel for onSyncComplete rebuilds
+	displayName          string // agent's display name, set during join
+	cachedPlatformUserID string // cached to avoid O(n) scan every call
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -111,6 +114,9 @@ func (c *Connector) Start(ctx context.Context) error {
 	// Establish pairwise secrets with all known agents
 	c.EstablishPairwiseSecrets()
 
+	// Replay group key distributes (must run after pairwise secrets are established)
+	c.replayGroupKeyDistributes()
+
 	// Initialize local rate limiter (rule N6)
 	localRate := c.cfg.LocalRateLimit
 	if localRate == 0 {
@@ -154,11 +160,49 @@ func (c *Connector) Start(ctx context.Context) error {
 		return fmt.Errorf("start gossip: %w", err)
 	}
 
-	// Rebuild in-memory state when new entries arrive via gossip
+	// Debounced rebuild: collapses N rapid-fire sync completions into one rebuild.
+	// Without this, 10 peers syncing simultaneously would trigger 10 full DB scans.
+	c.syncRebuild = make(chan struct{}, 1)
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		for {
+			select {
+			case <-c.ctx.Done():
+				return
+			case <-c.syncRebuild:
+				// Wait 500ms for more sync completions to coalesce
+				timer := time.NewTimer(500 * time.Millisecond)
+				select {
+				case <-c.ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+				// Drain any additional signals that arrived
+				for {
+					select {
+					case <-c.syncRebuild:
+					default:
+						goto rebuild
+					}
+				}
+			rebuild:
+				c.registry.LoadFromDB(c.logDB)
+				c.replayChannelState()
+				c.replayOrgRelationships()
+				c.EstablishPairwiseSecrets()
+				c.replayGroupKeyDistributes()
+			}
+		}
+	}()
+
 	c.node.SetOnSyncComplete(func() {
-		c.registry.LoadFromDB(c.logDB)
-		c.replayChannelState()
-		c.replayOrgRelationships()
+		select {
+		case c.syncRebuild <- struct{}{}:
+		default:
+			// rebuild already pending
+		}
 	})
 
 	c.startedAt = time.Now()
@@ -387,6 +431,11 @@ func (c *Connector) GetPSK() []byte {
 	return psk
 }
 
+// SetDisplayName sets the agent's display name (used in join requests).
+func (c *Connector) SetDisplayName(name string) {
+	c.displayName = name
+}
+
 // WebUITokenPath returns the path to the web UI bearer token file.
 func (c *Connector) WebUITokenPath() string {
 	return filepath.Join(c.cfg.DataDir, "webui.token")
@@ -545,11 +594,21 @@ func (c *Connector) startJoinRequestWatcher() {
 
 	rv := rendezvous.NewSlackProvider(string(token), c.log)
 
+	// Use cached channel ID to skip full Slack channel scan on restart
+	if cachedID := c.keyDB.GetRendezvousChannelID(); cachedID != "" {
+		rv.SetCachedChannelID(cachedID)
+	}
+
 	// Check if the channel exists before starting the watcher
 	exists, err := rv.WorkspaceExists(c.ctx)
 	if err != nil || !exists {
 		c.log.Info("rendezvous channel not found, join request watcher not started")
 		return
+	}
+
+	// Cache the resolved channel ID for fast startup next time
+	if chID := rv.ChannelID(); chID != "" {
+		c.keyDB.SetRendezvousChannelID(chID)
 	}
 
 	c.wg.Add(1)
@@ -587,6 +646,9 @@ func (c *Connector) rediscoverPeersFromSlack() {
 	}
 
 	rv := rendezvous.NewSlackProvider(string(token), c.log)
+	if cachedID := c.keyDB.GetRendezvousChannelID(); cachedID != "" {
+		rv.SetCachedChannelID(cachedID)
+	}
 	exists, err := rv.WorkspaceExists(c.ctx)
 	if err != nil || !exists {
 		return

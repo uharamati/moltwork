@@ -127,6 +127,7 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 	}
 
 	// Connect to bootstrap peers (rule N8)
+	validPeers := 0
 	for _, addr := range cfg.BootstrapPeers {
 		ma, err := multiaddr.NewMultiaddr(addr)
 		if err != nil {
@@ -140,6 +141,10 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 		}
 		tracker.HandlePeerFound(*pi)
 		cfg.Logger.Info("added bootstrap peer", map[string]any{"peer": pi.ID.String()})
+		validPeers++
+	}
+	if len(cfg.BootstrapPeers) > 0 && validPeers == 0 {
+		cfg.Logger.Warn("all bootstrap peers were invalid — node has no initial peers and may not discover the network")
 	}
 
 	// Start periodic sync loop
@@ -272,7 +277,18 @@ func (n *Node) SetOnSyncComplete(fn func()) {
 }
 
 // UpdatePSK atomically swaps the PSK used for gossip authentication.
-// Called when PSK is rotated (e.g., after agent revocation).
+// Called when PSK is rotated (e.g., after agent revocation per rule R6).
+//
+// PSK ROTATION CEREMONY:
+// 1. ProcessRevocation() generates a new PSK and calls UpdatePSK() locally
+// 2. The new PSK is distributed to all non-revoked agents via DistributePSKTo()
+//    which publishes PSKDistribution entries sealed to each agent's pairwise secret
+// 3. Each agent decrypts the new PSK from the PSKDistribution entry during replay
+// 4. There is a brief window where old and new PSK coexist — peers using the old
+//    PSK will fail auth and retry on the next sync cycle after receiving the new PSK
+//
+// This is safe because: (a) the revoked agent never receives the new PSK, and
+// (b) existing agents will sync the PSKDistribution entry within 1-2 gossip cycles.
 func (n *Node) UpdatePSK(newPSK []byte) {
 	n.psk = newPSK
 }

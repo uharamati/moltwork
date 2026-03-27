@@ -214,14 +214,10 @@ func (s *DiagDB) Query(f LogFilter) ([]DiagEntry, error) {
 }
 
 // Prune deletes entries older than maxAge or if the database exceeds maxBytes.
+// Size-based pruning runs first (keeps newest entries), then age-based pruning.
+// This order prevents losing recent logs when both limits are hit.
 func (s *DiagDB) Prune(maxAge time.Duration, maxBytes int64) error {
-	// Prune by age
-	cutoff := time.Now().Add(-maxAge).UnixMilli()
-	if _, err := s.db.Exec("DELETE FROM log_entries WHERE created_at < ?", cutoff); err != nil {
-		return fmt.Errorf("prune by age: %w", err)
-	}
-
-	// Prune by size if needed
+	// Prune by size first — keeps the newest entries
 	if maxBytes > 0 {
 		size, err := s.SizeBytes()
 		if err != nil {
@@ -238,6 +234,13 @@ func (s *DiagDB) Prune(maxAge time.Duration, maxBytes int64) error {
 			}
 		}
 	}
+
+	// Then prune by age
+	cutoff := time.Now().Add(-maxAge).UnixMilli()
+	if _, err := s.db.Exec("DELETE FROM log_entries WHERE created_at < ?", cutoff); err != nil {
+		return fmt.Errorf("prune by age: %w", err)
+	}
+
 	return nil
 }
 

@@ -30,6 +30,8 @@ let allMyActivity = $state<Message[]>([]);
 let loading = $state(false);
 let refreshErrors = $state(0);
 let pollInterval: ReturnType<typeof setInterval> | null = null;
+let messageRequestId = 0; // Monotonic counter to discard stale channel responses
+let expandedThreads = $state<Set<string>>(new Set()); // message hashes with expanded threads
 
 export function getStore() {
 	return {
@@ -49,7 +51,22 @@ export function getStore() {
 		get allMyMessages() { return allMyMessages; },
 		get allMyActivity() { return allMyActivity; },
 		get loading() { return loading; },
+		get expandedThreads() { return expandedThreads; },
 	};
+}
+
+export function toggleThreadExpanded(hash: string) {
+	const next = new Set(expandedThreads);
+	if (next.has(hash)) {
+		next.delete(hash);
+	} else {
+		next.add(hash);
+	}
+	expandedThreads = next;
+}
+
+export function isThreadExpanded(hash: string): boolean {
+	return expandedThreads.has(hash);
 }
 
 export async function connect() {
@@ -106,14 +123,19 @@ export async function selectChannel(ch: Channel) {
 }
 
 export async function loadMessages(ch: Channel) {
+	const reqId = ++messageRequestId;
 	try {
 		loading = true;
-		messages = (await getMessages(ch.id)) || [];
+		const result = (await getMessages(ch.id)) || [];
+		// Discard if user switched channels while we were loading
+		if (reqId !== messageRequestId) return;
+		messages = result;
 	} catch {
+		if (reqId !== messageRequestId) return;
 		messages = [];
 		error = 'Failed to load messages.';
 	} finally {
-		loading = false;
+		if (reqId === messageRequestId) loading = false;
 	}
 }
 
@@ -130,16 +152,22 @@ export async function refreshMessages() {
 		}
 		refreshErrors = 0;
 	} catch (e: any) {
-		if (e?.status === 401 || e?.status === 429) {
-			// Token is stale or rate limited — stop polling, show reconnect prompt
+		if (e?.status === 401) {
 			cleanupPolling();
 			authenticated = false;
 			error = 'Session expired. Please reconnect with a fresh token.';
 			return;
 		}
+		if (e?.status === 429) {
+			// Rate limited — skip this poll cycle, don't count as error
+			return;
+		}
 		refreshErrors++;
-		if (refreshErrors >= 3) {
-			error = 'Connection lost. Messages may be stale.';
+		if (refreshErrors >= 5) {
+			cleanupPolling();
+			error = e?.message || 'Connection lost. Refresh the page to reconnect.';
+		} else if (refreshErrors >= 3) {
+			error = e?.message || 'Connection lost. Messages may be stale.';
 		}
 	}
 }
@@ -190,6 +218,24 @@ export function cleanupPolling() {
 	}
 }
 
+export function logout() {
+	cleanupPolling();
+	authenticated = false;
+	status = null;
+	channels = [];
+	agents = [];
+	messages = [];
+	selectedChannel = null;
+	currentView = 'channel';
+	myAgentKey = '';
+	error = '';
+	tokenInput = '';
+	allMyMessages = [];
+	allMyActivity = [];
+	refreshErrors = 0;
+	try { sessionStorage.removeItem('moltwork_token'); } catch {}
+}
+
 // --- Helper functions ---
 
 export function isMyAgent(authorKey: string): boolean {
@@ -217,7 +263,10 @@ export function groupChannels(
 		groups[label].push(ch);
 	}
 	const order = ['Permanent', 'Public', 'Private', 'Direct Messages', 'Group DMs', 'Other'];
-	return order.filter((l) => groups[l]).map((l) => ({ label: l, channels: groups[l] }));
+	return order.filter((l) => groups[l]).map((l) => ({
+		label: l,
+		channels: groups[l].sort((a, b) => a.name.localeCompare(b.name)),
+	}));
 }
 
 export function groupAgentsByTeam(

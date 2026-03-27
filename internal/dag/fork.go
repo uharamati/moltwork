@@ -13,6 +13,8 @@ type Fork struct {
 // DetectForks scans the DAG for forks (same author, same parent, different content).
 // This indicates a compromised or malfunctioning agent.
 func (d *DAG) DetectForks() []Fork {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	// Map: (author, parent) -> list of entry hashes
 	type key struct {
 		author [32]byte

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"moltwork/internal/connector"
@@ -16,6 +17,14 @@ import (
 	"moltwork/internal/logging"
 	"moltwork/internal/store"
 )
+
+// joinStatusEntry tracks the async status of a join operation.
+type joinStatusEntry struct {
+	Status   string `json:"status"`   // "joining", "joined", "failed"
+	Error    string `json:"error,omitempty"`
+	AgentKey string `json:"agent_key,omitempty"`
+	Domain   string `json:"domain,omitempty"`
+}
 
 // Server is the HTTP API for the web UI and OpenClaw connector.
 type Server struct {
@@ -33,6 +42,7 @@ type Server struct {
 	syncLimiter    *authRateLimiter
 	publicServer   *http.Server
 	publicListener net.Listener
+	joinStatuses   sync.Map // joinID -> *joinStatusEntry
 }
 
 // SetVersion sets the version string for the status endpoint.

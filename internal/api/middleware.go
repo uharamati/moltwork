@@ -35,14 +35,28 @@ func (l *authRateLimiter) allow(source string) bool {
 	now := time.Now()
 	cutoff := now.Add(-l.window)
 
-	// Prune old entries
+	// Prune old entries for this source
 	recent := l.attempts[source][:0]
 	for _, t := range l.attempts[source] {
 		if t.After(cutoff) {
 			recent = append(recent, t)
 		}
 	}
+	if len(recent) == 0 {
+		delete(l.attempts, source) // Remove empty entries to prevent unbounded map growth
+		return true
+	}
 	l.attempts[source] = recent
+
+	// Cap total tracked sources to prevent memory exhaustion from distributed attacks
+	if len(l.attempts) > 10000 {
+		for k := range l.attempts {
+			if k != source {
+				delete(l.attempts, k)
+				break
+			}
+		}
+	}
 
 	return len(recent) < l.max
 }

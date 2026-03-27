@@ -195,9 +195,14 @@ func ParseJoinResponse(text string) *JoinResponse {
 	}
 }
 
-// ParseClaim checks if a message is a claim reply. Returns the claimer's
-// public key if it is, nil otherwise.
-func ParseClaim(text string) []byte {
+// Claim represents a parsed claim message with the claimer's public key.
+type Claim struct {
+	ClaimerKey []byte
+}
+
+// ParseClaim checks if a message is a claim reply. Returns the parsed Claim
+// with the claimer's public key, or nil if the message is not a claim.
+func ParseClaim(text string) *Claim {
 	jsonStr := extractCodeBlock(text, TagClaim)
 	if jsonStr == "" {
 		return nil
@@ -215,7 +220,7 @@ func ParseClaim(text string) []byte {
 	if err != nil {
 		return nil
 	}
-	return key
+	return &Claim{ClaimerKey: key}
 }
 
 // extractCodeBlock finds a fenced code block with the given tag and

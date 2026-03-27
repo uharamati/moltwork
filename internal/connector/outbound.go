@@ -8,6 +8,7 @@ import (
 	"moltwork/internal/channel"
 	"moltwork/internal/crypto"
 	"moltwork/internal/dag"
+	"moltwork/internal/store"
 )
 
 // encryptForChannel encrypts content based on channel type.
@@ -28,7 +29,8 @@ func (c *Connector) encryptForChannel(ch *channel.Channel, content []byte) ([]by
 	case moltcbor.ChannelTypeDM:
 		var peerKey []byte
 		selfHex := fmt.Sprintf("%x", c.keyPair.Public)
-		for hexKey := range ch.Members {
+		members := ch.MembersSnapshot()
+		for hexKey := range members {
 			if hexKey != selfHex {
 				decoded, err := hex.DecodeString(hexKey)
 				if err != nil {
@@ -53,12 +55,25 @@ func (c *Connector) encryptForChannel(ch *channel.Channel, content []byte) ([]by
 	return content, nil
 }
 
-// publishEntry is the common pattern for creating a signed DAG entry and storing it.
+// PublishEntry is the common pattern for creating a signed DAG entry and storing it.
+// Exported so the API layer can use it instead of bypassing rate limits.
+func (c *Connector) PublishEntry(entryType moltcbor.EntryType, payload []byte) error {
+	return c.publishEntry(entryType, payload)
+}
+
+// publishEntry is the internal implementation.
 func (c *Connector) publishEntry(entryType moltcbor.EntryType, payload []byte) error {
 	tips := c.dagState.Tips()
 	entry, err := dag.NewSignedEntry(entryType, payload, c.keyPair, tips)
 	if err != nil {
 		return fmt.Errorf("create entry: %w", err)
+	}
+
+	// Check entry size before inserting — otherwise the entry would exist
+	// in the in-memory DAG but be rejected by InsertEntry, causing a
+	// ghost entry that disappears on restart.
+	if len(entry.RawCBOR) > store.MaxEntrySize {
+		return fmt.Errorf("entry size %d exceeds maximum %d", len(entry.RawCBOR), store.MaxEntrySize)
 	}
 
 	if err := c.dagState.Insert(entry); err != nil {
@@ -108,7 +123,8 @@ func (c *Connector) rotateGroupKey(ch *channel.Channel, excludeKeys ...[]byte) e
 	}
 
 	var distErrors int
-	for memberHex := range ch.Members {
+	members := ch.MembersSnapshot()
+	for memberHex := range members {
 		if excludeSet[memberHex] {
 			continue
 		}
@@ -126,7 +142,10 @@ func (c *Connector) rotateGroupKey(ch *channel.Channel, excludeKeys ...[]byte) e
 		}
 		var secretArr [32]byte
 		copy(secretArr[:], secret)
-		sealed, err := crypto.SealForPeer(secretArr, newKey)
+		// Bind the sealed blob to channelID + epoch (P3 fix) so a malicious
+		// insider cannot swap group keys between channels
+		bound := sealGroupKeyWithBinding(ch.ID, newEpoch, newKey)
+		sealed, err := crypto.SealForPeer(secretArr, bound)
 		if err != nil {
 			c.log.Warn("seal group key failed", map[string]any{"member": memberHex, "error": err.Error()})
 			distErrors++
@@ -159,12 +178,69 @@ func (c *Connector) rotateGroupKey(ch *channel.Channel, excludeKeys ...[]byte) e
 	return nil
 }
 
+// DistributeInitialGroupKey distributes the group key to all initial members
+// of a newly created private channel. Without this, members added at creation
+// time can't read or write messages.
+func (c *Connector) DistributeInitialGroupKey(ch *channel.Channel) error {
+	keyBytes, epoch, err := c.keyDB.GetGroupKey(ch.ID)
+	if err != nil || keyBytes == nil {
+		return fmt.Errorf("no group key for channel")
+	}
+
+	selfHex := fmt.Sprintf("%x", c.keyPair.Public)
+	for memberHex := range ch.Members {
+		if memberHex == selfHex {
+			continue // creator already has the key
+		}
+		memberKey, err := hex.DecodeString(memberHex)
+		if err != nil {
+			continue
+		}
+		secret, _, err := c.keyDB.GetPairwiseSecret(memberKey)
+		if err != nil || secret == nil {
+			c.log.Warn("no pairwise secret for initial member", map[string]any{"member": memberHex[:16]})
+			continue
+		}
+		var secretArr [32]byte
+		copy(secretArr[:], secret)
+		bound := sealGroupKeyWithBinding(ch.ID, epoch, keyBytes)
+		sealed, err := crypto.SealForPeer(secretArr, bound)
+		if err != nil {
+			continue
+		}
+		dist := moltcbor.GroupKeyDistribute{
+			ChannelID:    ch.ID,
+			TargetPubKey: memberKey,
+			Sealed:       sealed,
+			Epoch:        uint64(epoch),
+		}
+		distPayload, err := moltcbor.Marshal(dist)
+		if err != nil {
+			continue
+		}
+		if err := c.publishEntry(moltcbor.EntryTypeGroupKeyDistribute, distPayload); err != nil {
+			c.log.Warn("distribute initial group key failed", map[string]any{
+				"member": memberHex[:16],
+				"error":  err.Error(),
+			})
+		}
+	}
+	return nil
+}
+
 // --- Message sending ---
 
 // SendMessage sends a message to a channel.
 // For encrypted channels (private, DM, group DM), the entire message is wrapped
 // in a SealedEntry for metadata privacy — non-participants cannot distinguish
 // entry types or see channel IDs.
+//
+// SECURITY NOTE: Channel membership is checked here but NOT enforced at the DAG
+// layer. A malicious agent could craft entries for channels it's not in — the
+// content would be encrypted (unreadable), but the existence of the entry (metadata)
+// would be visible. This is an accepted tradeoff: adding DAG-layer membership
+// checks would require all nodes to maintain synchronized membership state, which
+// conflicts with the eventually-consistent gossip model.
 func (c *Connector) SendMessage(channelID []byte, content []byte, messageType uint8,
 	action, scope, authorityBasis, urgency string) error {
 	if err := c.checkRateLimit(); err != nil {
@@ -302,7 +378,8 @@ func (c *Connector) getChannelKey(ch *channel.Channel) ([32]byte, error) {
 	case moltcbor.ChannelTypeDM:
 		var peerKey []byte
 		selfHex := fmt.Sprintf("%x", c.keyPair.Public)
-		for hexKey := range ch.Members {
+		members := ch.MembersSnapshot()
+		for hexKey := range members {
 			if hexKey != selfHex {
 				decoded, err := hex.DecodeString(hexKey)
 				if err != nil {
@@ -376,8 +453,14 @@ func (c *Connector) PublishChannelLeave(channelID []byte) error {
 		if err := channel.LeavePrivateChannel(ch, c.keyPair.Public); err != nil {
 			return err
 		}
-		// Rotate group key since a member left
-		c.rotateGroupKey(ch, c.keyPair.Public)
+		// Rotate group key since a member left — forward secrecy requires this
+		if err := c.rotateGroupKey(ch, c.keyPair.Public); err != nil {
+			c.log.Error("group key rotation failed after channel leave — forward secrecy violated", map[string]any{
+				"channel": ch.Name,
+				"error":   err.Error(),
+			})
+			return fmt.Errorf("rotate group key after leave: %w", err)
+		}
 	default:
 		ch.RemoveMember(c.keyPair.Public)
 	}
@@ -414,7 +497,8 @@ func (c *Connector) PublishMemberInvite(channelID, inviteeKey []byte) error {
 			if keyBytes != nil {
 				var secretArr [32]byte
 				copy(secretArr[:], secret)
-				sealed, err := crypto.SealForPeer(secretArr, keyBytes)
+				bound := sealGroupKeyWithBinding(channelID, epoch, keyBytes)
+				sealed, err := crypto.SealForPeer(secretArr, bound)
 				if err == nil {
 					dist := moltcbor.GroupKeyDistribute{
 						ChannelID:    channelID,
@@ -587,4 +671,40 @@ func (c *Connector) PublishChannelUnarchive(channelID []byte) error {
 	}
 
 	return c.publishEntry(moltcbor.EntryTypeChannelUnarchive, payload)
+}
+
+// sealGroupKeyWithBinding prepends channelID + epoch to the group key
+// before sealing, preventing cross-channel key substitution attacks (P3).
+func sealGroupKeyWithBinding(channelID []byte, epoch int, groupKey []byte) []byte {
+	// Format: [channelID (variable)] [epoch as 8 bytes big-endian] [groupKey (32 bytes)]
+	buf := make([]byte, 0, len(channelID)+8+len(groupKey))
+	buf = append(buf, channelID...)
+	epochBytes := make([]byte, 8)
+	epochBytes[0] = byte(epoch >> 56)
+	epochBytes[1] = byte(epoch >> 48)
+	epochBytes[2] = byte(epoch >> 40)
+	epochBytes[3] = byte(epoch >> 32)
+	epochBytes[4] = byte(epoch >> 24)
+	epochBytes[5] = byte(epoch >> 16)
+	epochBytes[6] = byte(epoch >> 8)
+	epochBytes[7] = byte(epoch)
+	buf = append(buf, epochBytes...)
+	buf = append(buf, groupKey...)
+	return buf
+}
+
+// unsealGroupKeyWithBinding decrypts and verifies the channelID + epoch binding,
+// returning only the 32-byte group key if the binding matches.
+func unsealGroupKeyWithBinding(channelID []byte, epoch uint64, bound []byte) ([]byte, error) {
+	expectedPrefix := sealGroupKeyWithBinding(channelID, int(epoch), nil)
+	prefixLen := len(expectedPrefix)
+	if len(bound) < prefixLen+32 {
+		return nil, fmt.Errorf("bound payload too short")
+	}
+	for i := 0; i < prefixLen; i++ {
+		if bound[i] != expectedPrefix[i] {
+			return nil, fmt.Errorf("channel/epoch binding mismatch")
+		}
+	}
+	return bound[prefixLen : prefixLen+32], nil
 }

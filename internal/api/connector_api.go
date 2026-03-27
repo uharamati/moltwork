@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -24,6 +25,7 @@ func (s *Server) registerConnectorRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/bootstrap", s.handleBootstrap)
 	mux.HandleFunc("POST /api/join", s.handleJoin)
 	mux.HandleFunc("POST /api/join/rendezvous", s.handleJoinRendezvous)
+	mux.HandleFunc("GET /api/join/{id}/status", s.handleJoinStatus)
 
 	// --- Messaging ---
 	mux.HandleFunc("POST /api/messages/send", s.handleSendMessage)
@@ -97,7 +99,18 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// --- Join (with platform verification and trust boundary enforcement) ---
+// --- Join ---
+//
+// Two join paths exist:
+//   - POST /api/join (handleJoin): Used by the WELCOMING agent. This is the
+//     agent that is already in the workspace and receives a new agent's join
+//     request via Slack. The welcoming agent registers the new agent, distributes
+//     the PSK, and posts the introduction. This call is synchronous and fast.
+//
+//   - POST /api/join/rendezvous (handleJoinRendezvous): Used by the JOINING agent.
+//     This is the new agent that wants to join the workspace. It triggers the full
+//     Slack-mediated join flow (PSK exchange + HTTP chain sync). This call is
+//     async — returns a join_id for polling via GET /api/join/{id}/status.
 
 type joinRequest struct {
 	DisplayName   string `json:"display_name"`
@@ -185,7 +198,7 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Publish registration entry to the DAG
+	// Publish registration entry to the DAG via publishEntry (rate limited + atomic)
 	reg := moltcbor.AgentRegistration{
 		PublicKey:      kp.Public,
 		ExchangePubKey: exchKey.Public[:],
@@ -195,17 +208,15 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		Title:          req.Title,
 		Team:           req.Team,
 	}
-	payload, _ := moltcbor.Marshal(reg)
-	tips := s.conn.DAG().Tips()
-	entry, err := dag.NewSignedEntry(moltcbor.EntryTypeAgentRegistration, payload, kp, tips)
+	payload, err := moltcbor.Marshal(reg)
 	if err != nil {
 		writeError(w, r, merrors.OnboardingPubkeyPublishAppendFailed(), 500)
 		return
 	}
-
-	s.conn.DAG().Insert(entry)
-	s.conn.LogDB().InsertEntry(entry.Hash[:], entry.RawCBOR, entry.AuthorKey, entry.Signature,
-		int(moltcbor.EntryTypeAgentRegistration), entry.CreatedAt, hashesToSlices(entry.Parents))
+	if err := s.conn.PublishEntry(moltcbor.EntryTypeAgentRegistration, payload); err != nil {
+		writeError(w, r, merrors.OnboardingPubkeyPublishAppendFailed(), 500)
+		return
+	}
 
 	// Auto-join all permanent channels
 	channels := s.conn.Channels().List(kp.Public)
@@ -295,59 +306,80 @@ func (s *Server) handleJoinRendezvous(w http.ResponseWriter, r *http.Request) {
 	// Store platform token for the connector to use during join
 	s.conn.KeyDB().SetPlatformToken([]byte(req.PlatformToken), req.Platform, platformID.WorkspaceDomain)
 
-	// Trigger the full join flow (Slack PSK exchange + HTTP chain sync + gossip)
-	if err := s.conn.Join(r.Context(), req.Platform, platformID.WorkspaceDomain, req.PlatformToken); err != nil {
-		httpError(w, "join failed: "+err.Error(), 500)
+	// Set display name so the join request to Slack uses the real name
+	s.conn.SetDisplayName(req.DisplayName)
+
+	// Generate a join ID and return immediately — the join flow runs async
+	// because it can take up to 5 minutes (WatchForJoinResponse polling).
+	// Client polls GET /api/join/{id}/status for progress.
+	joinID := fmt.Sprintf("%x", crypto.RandomBytes(16))
+	s.joinStatuses.Store(joinID, &joinStatusEntry{Status: "joining"})
+
+	go func() {
+		// Trigger the full join flow (Slack PSK exchange + HTTP chain sync + gossip)
+		if err := s.conn.Join(context.Background(), req.Platform, platformID.WorkspaceDomain, req.PlatformToken); err != nil {
+			s.joinStatuses.Store(joinID, &joinStatusEntry{Status: "failed", Error: err.Error()})
+			return
+		}
+
+		// Register this agent in the workspace (publish registration entry)
+		kp := s.conn.KeyPair()
+		exchKey := s.conn.ExchangeKey()
+
+		agent := &identity.Agent{
+			PublicKey:      kp.Public,
+			ExchangePubKey: exchKey.Public[:],
+			PlatformUserID: platformID.UserID,
+			Platform:       req.Platform,
+			DisplayName:    req.DisplayName,
+			Title:          req.Title,
+			Team:           req.Team,
+		}
+		s.conn.Registry().Register(agent)
+
+		reg := moltcbor.AgentRegistration{
+			PublicKey:      kp.Public,
+			ExchangePubKey: exchKey.Public[:],
+			PlatformUserID: platformID.UserID,
+			Platform:       req.Platform,
+			DisplayName:    req.DisplayName,
+			Title:          req.Title,
+			Team:           req.Team,
+		}
+		regPayload, _ := moltcbor.Marshal(reg)
+		s.conn.PublishEntry(moltcbor.EntryTypeAgentRegistration, regPayload)
+
+		s.joinChannelsAndIntroduce(kp.Public, req.DisplayName, req.Title, req.Team)
+		s.conn.EstablishPairwiseSecrets()
+
+		s.joinStatuses.Store(joinID, &joinStatusEntry{
+			Status:   "joined",
+			AgentKey: fmt.Sprintf("%x", kp.Public),
+			Domain:   platformID.WorkspaceDomain,
+		})
+	}()
+
+	writeSuccess(w, r, map[string]any{
+		"status":  "joining",
+		"join_id": joinID,
+	})
+}
+
+// handleJoinStatus returns the async status of a join operation.
+func (s *Server) handleJoinStatus(w http.ResponseWriter, r *http.Request) {
+	joinID := r.PathValue("id")
+	if joinID == "" {
+		httpError(w, "join ID required", 400)
 		return
 	}
 
-	// Register this agent in the workspace (publish registration entry)
-	kp := s.conn.KeyPair()
-	exchKey := s.conn.ExchangeKey()
-
-	agent := &identity.Agent{
-		PublicKey:      kp.Public,
-		ExchangePubKey: exchKey.Public[:],
-		PlatformUserID: platformID.UserID,
-		Platform:       req.Platform,
-		DisplayName:    req.DisplayName,
-		Title:          req.Title,
-		Team:           req.Team,
+	entry, ok := s.joinStatuses.Load(joinID)
+	if !ok {
+		httpError(w, "unknown join ID", 404)
+		return
 	}
-	s.conn.Registry().Register(agent)
 
-	reg := moltcbor.AgentRegistration{
-		PublicKey:      kp.Public,
-		ExchangePubKey: exchKey.Public[:],
-		PlatformUserID: platformID.UserID,
-		Platform:       req.Platform,
-		DisplayName:    req.DisplayName,
-		Title:          req.Title,
-		Team:           req.Team,
-	}
-	payload, _ := moltcbor.Marshal(reg)
-	tips := s.conn.DAG().Tips()
-	entry, _ := dag.NewSignedEntry(moltcbor.EntryTypeAgentRegistration, payload, kp, tips)
-	s.conn.DAG().Insert(entry)
-	s.conn.LogDB().InsertEntry(entry.Hash[:], entry.RawCBOR, entry.AuthorKey, entry.Signature,
-		int(moltcbor.EntryTypeAgentRegistration), entry.CreatedAt, hashesToSlices(entry.Parents))
-
-	// Join permanent channels and post introduction.
-	// Channels may not be available yet (gossip sync happens async after Join).
-	// Try now, and if empty, retry in background after sync delivers them.
-	displayName := req.DisplayName
-	title := req.Title
-	team := req.Team
-	s.joinChannelsAndIntroduce(kp.Public, displayName, title, team)
-
-	// Establish pairwise secrets with existing agents
-	s.conn.EstablishPairwiseSecrets()
-
-	writeSuccess(w, r, map[string]any{
-		"status":    "joined",
-		"agent_key": fmt.Sprintf("%x", kp.Public),
-		"domain":    platformID.WorkspaceDomain,
-	})
+	writeSuccess(w, r, entry.(*joinStatusEntry))
 }
 
 // joinChannelsAndIntroduce joins permanent channels and posts an introduction.
@@ -567,19 +599,29 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Publish channel creation to DAG
+	// Publish channel creation to DAG via publishEntry (rate limited + atomic)
 	chCreate := moltcbor.ChannelCreate{
 		ChannelID:   ch.ID,
 		Name:        ch.Name,
 		Description: ch.Description,
 		ChannelType: ch.Type,
 	}
-	payload, _ := moltcbor.Marshal(chCreate)
-	tips := s.conn.DAG().Tips()
-	entry, _ := dag.NewSignedEntry(moltcbor.EntryTypeChannelCreate, payload, kp, tips)
-	s.conn.DAG().Insert(entry)
-	s.conn.LogDB().InsertEntry(entry.Hash[:], entry.RawCBOR, entry.AuthorKey, entry.Signature,
-		int(moltcbor.EntryTypeChannelCreate), entry.CreatedAt, hashesToSlices(entry.Parents))
+	payload, err := moltcbor.Marshal(chCreate)
+	if err != nil {
+		writeError(w, r, fmt.Errorf("marshal channel create: %w", err), 500)
+		return
+	}
+	if err := s.conn.PublishEntry(moltcbor.EntryTypeChannelCreate, payload); err != nil {
+		writeError(w, r, fmt.Errorf("publish channel create: %w", err), 500)
+		return
+	}
+
+	// For private channels, distribute the initial group key to all members
+	if req.Type == "private" {
+		if rotateErr := s.conn.DistributeInitialGroupKey(ch); rotateErr != nil {
+			s.conn.Log().Warn("distribute initial group key failed", map[string]any{"error": rotateErr.Error()})
+		}
+	}
 
 	writeSuccess(w, r, map[string]any{
 		"status":     "created",

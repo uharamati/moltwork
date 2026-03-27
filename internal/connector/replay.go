@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"sort"
@@ -109,9 +110,14 @@ func (c *Connector) replayChannelState() {
 		allEntries = append(allEntries, entries...)
 	}
 
-	// Sort by created_at to maintain causal order
+	// Sort by (created_at, then hash) to maintain causal order.
+	// Two entries within the same second (e.g., ChannelCreate + ChannelJoin)
+	// must be deterministically ordered to prevent silent membership drops.
 	sort.Slice(allEntries, func(i, j int) bool {
-		return allEntries[i].CreatedAt < allEntries[j].CreatedAt
+		if allEntries[i].CreatedAt != allEntries[j].CreatedAt {
+			return allEntries[i].CreatedAt < allEntries[j].CreatedAt
+		}
+		return bytes.Compare(allEntries[i].Hash, allEntries[j].Hash) < 0
 	})
 
 	channels, members := 0, 0
@@ -141,6 +147,17 @@ func (c *Connector) replayChannelState() {
 			c.replayArchive(raw, true)
 		case moltcbor.EntryTypeChannelUnarchive:
 			c.replayArchive(raw, false)
+		}
+	}
+
+	// Second pass: retry membership entries that may have been dropped because
+	// the channel didn't exist yet (same-second ChannelCreate + ChannelJoin).
+	for _, raw := range allEntries {
+		switch moltcbor.EntryType(raw.EntryType) {
+		case moltcbor.EntryTypeChannelJoin:
+			c.replayChannelMembership(raw, true)
+		case moltcbor.EntryTypeMemberInvite:
+			c.replayMemberInviteRemove(raw, true)
 		}
 	}
 
@@ -297,6 +314,90 @@ func (c *Connector) replayArchive(raw *store.RawEntry, isArchive bool) {
 	}
 
 	ch.Archived = isArchive
+}
+
+// replayGroupKeyDistributes processes GroupKeyDistribute entries from the log,
+// extracting and storing group keys for private channels targeted at this agent.
+// Without this, private channel invites are broken — the agent receives the entry
+// via gossip but never extracts the group key from the sealed payload.
+func (c *Connector) replayGroupKeyDistributes() {
+	entries, err := c.logDB.EntriesByType(int(moltcbor.EntryTypeGroupKeyDistribute))
+	if err != nil {
+		c.log.Warn("replay group key distributes: query failed", map[string]any{"error": err.Error()})
+		return
+	}
+
+	stored := 0
+	for _, raw := range entries {
+		payload := decodePayload(raw)
+		if payload == nil {
+			continue
+		}
+
+		var dist moltcbor.GroupKeyDistribute
+		if err := moltcbor.Unmarshal(payload, &dist); err != nil {
+			continue
+		}
+
+		// Only process entries targeted at us
+		if !crypto.ConstantTimeEqual(dist.TargetPubKey, c.keyPair.Public) {
+			continue
+		}
+
+		// Check if we already have a key at this epoch or newer
+		_, existingEpoch, _ := c.keyDB.GetGroupKey(dist.ChannelID)
+		if existingEpoch >= int(dist.Epoch) {
+			continue
+		}
+
+		// Decrypt the sealed group key using our pairwise secret with the sender
+		secret, _, err := c.keyDB.GetPairwiseSecret(raw.AuthorKey)
+		if err != nil || secret == nil {
+			c.log.Warn("replay group key distribute: no pairwise secret for sender", map[string]any{
+				"sender": fmt.Sprintf("%x", raw.AuthorKey[:8]),
+			})
+			continue
+		}
+
+		var secretArr [32]byte
+		copy(secretArr[:], secret)
+		decrypted, err := crypto.OpenFromPeer(secretArr, dist.Sealed)
+		if err != nil {
+			c.log.Warn("replay group key distribute: decrypt failed", map[string]any{
+				"sender": fmt.Sprintf("%x", raw.AuthorKey[:8]),
+				"error":  err.Error(),
+			})
+			continue
+		}
+
+		// Try to verify channel/epoch binding (P3 fix).
+		// Fall back to raw 32-byte key for backward compatibility with
+		// entries sealed before the binding was added.
+		var groupKeyBytes []byte
+		if bound, err := unsealGroupKeyWithBinding(dist.ChannelID, dist.Epoch, decrypted); err == nil {
+			groupKeyBytes = bound
+		} else if len(decrypted) == 32 {
+			// Legacy format: just the raw group key
+			groupKeyBytes = decrypted
+		} else {
+			c.log.Warn("replay group key distribute: invalid payload", map[string]any{
+				"length": len(decrypted),
+			})
+			continue
+		}
+
+		if err := c.keyDB.SetGroupKey(dist.ChannelID, int(dist.Epoch), groupKeyBytes); err != nil {
+			c.log.Warn("replay group key distribute: store failed", map[string]any{
+				"error": err.Error(),
+			})
+			continue
+		}
+		stored++
+	}
+
+	if stored > 0 {
+		c.log.Info("replayed group key distributes", map[string]any{"count": stored})
+	}
 }
 
 // replayPairwiseKeyExchanges processes PairwiseKeyExchange entries from the log

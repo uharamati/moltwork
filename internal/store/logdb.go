@@ -57,6 +57,15 @@ func (s *LogDB) migrate() error {
 		return fmt.Errorf("enable foreign keys: %w", err)
 	}
 
+	// Schema version tracking — allows future migrations to be applied in order.
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		version INTEGER NOT NULL DEFAULT 1
+	)`); err != nil {
+		return fmt.Errorf("create schema_version: %w", err)
+	}
+	s.db.Exec("INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 1)")
+
 	_, err := s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS entries (
 			hash         BLOB PRIMARY KEY,
@@ -78,6 +87,11 @@ func (s *LogDB) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_entries_created ON entries(created_at);
 		CREATE INDEX IF NOT EXISTS idx_entries_type_author ON entries(entry_type, author_key);
 		CREATE INDEX IF NOT EXISTS idx_parents_parent ON entry_parents(parent_hash);
+
+		CREATE TABLE IF NOT EXISTS rejected_entries (
+			hash   BLOB PRIMARY KEY,
+			reason TEXT NOT NULL
+		);
 	`)
 	if err != nil {
 		return fmt.Errorf("migrate log db: %w", err)
@@ -213,29 +227,58 @@ func (s *LogDB) AllHashes() ([][]byte, error) {
 }
 
 // AllEntries returns all entries in the log with their parent hashes.
+// Uses a single JOIN query instead of N+1 GetParents calls.
 func (s *LogDB) AllEntries() ([]*RawEntry, error) {
-	rows, err := s.db.Query(
-		"SELECT hash, raw_cbor, author_key, signature, entry_type, created_at FROM entries ORDER BY created_at",
-	)
+	rows, err := s.db.Query(`
+		SELECT e.hash, e.raw_cbor, e.author_key, e.signature, e.entry_type, e.created_at, p.parent_hash
+		FROM entries e
+		LEFT JOIN entry_parents p ON e.hash = p.entry_hash
+		ORDER BY e.created_at, e.hash`)
 	if err != nil {
 		return nil, fmt.Errorf("all entries: %w", err)
 	}
 	defer rows.Close()
 
-	var entries []*RawEntry
+	entryMap := make(map[string]*RawEntry)
+	var order []string
 	for rows.Next() {
-		var e RawEntry
-		if err := rows.Scan(&e.Hash, &e.RawCBOR, &e.AuthorKey, &e.Signature, &e.EntryType, &e.CreatedAt); err != nil {
+		var hash, rawCBOR, authorKey, signature []byte
+		var entryType int
+		var createdAt int64
+		var parentHash []byte
+		if err := rows.Scan(&hash, &rawCBOR, &authorKey, &signature, &entryType, &createdAt, &parentHash); err != nil {
 			return nil, fmt.Errorf("scan entry: %w", err)
 		}
-		parents, err := s.GetParents(e.Hash)
-		if err != nil {
-			return nil, err
+		key := fmt.Sprintf("%x", hash)
+		if existing, ok := entryMap[key]; ok {
+			if parentHash != nil {
+				existing.Parents = append(existing.Parents, parentHash)
+			}
+		} else {
+			e := &RawEntry{
+				Hash:      hash,
+				RawCBOR:   rawCBOR,
+				AuthorKey: authorKey,
+				Signature: signature,
+				EntryType: entryType,
+				CreatedAt: createdAt,
+			}
+			if parentHash != nil {
+				e.Parents = [][]byte{parentHash}
+			}
+			entryMap[key] = e
+			order = append(order, key)
 		}
-		e.Parents = parents
-		entries = append(entries, &e)
 	}
-	return entries, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	entries := make([]*RawEntry, 0, len(order))
+	for _, key := range order {
+		entries = append(entries, entryMap[key])
+	}
+	return entries, nil
 }
 
 // EntriesByType returns all entries of a given type.
@@ -342,29 +385,15 @@ func (s *LogDB) GetEntriesByAuthor(authorKey []byte, afterTimestamp int64) ([]*R
 }
 
 // MarkEntryRejected flags an entry as rejected (rule R2).
-// Creates a rejected_entries table if needed and records the rejection.
 func (s *LogDB) MarkEntryRejected(hash []byte, reason string) error {
-	_, err := s.db.Exec(`
-		CREATE TABLE IF NOT EXISTS rejected_entries (
-			hash   BLOB PRIMARY KEY,
-			reason TEXT NOT NULL
-		)`)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.Exec("INSERT OR IGNORE INTO rejected_entries (hash, reason) VALUES (?, ?)", hash, reason)
+	_, err := s.db.Exec("INSERT OR IGNORE INTO rejected_entries (hash, reason) VALUES (?, ?)", hash, reason)
 	return err
 }
 
 // IsEntryRejected checks if an entry has been marked as rejected.
 func (s *LogDB) IsEntryRejected(hash []byte) (bool, error) {
-	// Table may not exist yet
 	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='rejected_entries'").Scan(&count)
-	if err != nil || count == 0 {
-		return false, nil
-	}
-	err = s.db.QueryRow("SELECT COUNT(*) FROM rejected_entries WHERE hash = ?", hash).Scan(&count)
+	err := s.db.QueryRow("SELECT COUNT(*) FROM rejected_entries WHERE hash = ?", hash).Scan(&count)
 	if err != nil {
 		return false, err
 	}

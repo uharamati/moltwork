@@ -11,6 +11,16 @@ import (
 )
 
 // KeyDB manages the key database with restricted permissions (rule S2).
+//
+// SECURITY NOTE: Secrets (PSK, platform tokens, private keys, pairwise secrets)
+// are stored as plaintext in this SQLite database. The file has 0600 permissions,
+// which prevents other users from reading it, but does NOT protect against:
+//   - Root access on the machine
+//   - Disk theft or backup exposure
+//   - Process memory dumps
+//
+// For production deployments, consider encrypting the database with a master key
+// derived from the OS keychain (macOS Keychain, Linux libsecret) or an HSM.
 type KeyDB struct {
 	db *sql.DB
 }
@@ -40,6 +50,18 @@ func OpenKeyDB(path string) (*KeyDB, error) {
 		return nil, fmt.Errorf("set WAL mode: %w", err)
 	}
 
+	// Integrity check on startup — without this, a corrupted keyDB opens silently
+	// and the agent starts with no identity, no PSK, no group keys.
+	var result string
+	if err := db.QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("key db integrity check: %w", err)
+	}
+	if result != "ok" {
+		db.Close()
+		return nil, fmt.Errorf("key db integrity check failed: %s", result)
+	}
+
 	s := &KeyDB{db: db}
 	if err := s.migrate(); err != nil {
 		db.Close()
@@ -49,6 +71,15 @@ func OpenKeyDB(path string) (*KeyDB, error) {
 }
 
 func (s *KeyDB) migrate() error {
+	// Schema version tracking
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		version INTEGER NOT NULL DEFAULT 1
+	)`); err != nil {
+		return fmt.Errorf("create schema_version: %w", err)
+	}
+	s.db.Exec("INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 1)")
+
 	_, err := s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS identity (
 			id           INTEGER PRIMARY KEY CHECK (id = 1),
@@ -86,6 +117,11 @@ func (s *KeyDB) migrate() error {
 			id          INTEGER PRIMARY KEY CHECK (id = 1),
 			public_key  BLOB NOT NULL,
 			private_key BLOB NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS rendezvous_channel (
+			id         INTEGER PRIMARY KEY CHECK (id = 1),
+			channel_id TEXT NOT NULL
 		);
 	`)
 	if err != nil {
@@ -237,6 +273,25 @@ func (s *KeyDB) GetExchangeKeys() (publicKey, privateKey []byte, err error) {
 		return nil, nil, nil
 	}
 	return
+}
+
+// SetRendezvousChannelID persists the Slack channel ID after first resolution.
+func (s *KeyDB) SetRendezvousChannelID(channelID string) error {
+	_, err := s.db.Exec(
+		"INSERT OR REPLACE INTO rendezvous_channel (id, channel_id) VALUES (1, ?)",
+		channelID,
+	)
+	return err
+}
+
+// GetRendezvousChannelID returns the cached Slack channel ID, or empty string.
+func (s *KeyDB) GetRendezvousChannelID() string {
+	var id string
+	err := s.db.QueryRow("SELECT channel_id FROM rendezvous_channel WHERE id = 1").Scan(&id)
+	if err != nil {
+		return ""
+	}
+	return id
 }
 
 // Close closes the database.
