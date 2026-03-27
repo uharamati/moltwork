@@ -47,15 +47,10 @@ func (r *Registry) LoadFromDB(logDB *store.LogDB) error {
 	for _, raw := range entries {
 		// Verify signature first (rule C2)
 		if err := crypto.Verify(raw.AuthorKey, raw.RawCBOR, raw.Signature); err != nil {
-			continue // skip invalid entries
-		}
-
-		var env moltcbor.Envelope
-		if err := moltcbor.Unmarshal(raw.RawCBOR, &env); err != nil {
 			continue
 		}
 
-		// Decode the signable wrapper to get the envelope bytes
+		// Decode the signable wrapper to get the inner envelope
 		var sigData struct {
 			Parents  [][]byte `cbor:"1,keyasint"`
 			Envelope []byte   `cbor:"2,keyasint"`

@@ -522,6 +522,10 @@ func (s *Server) handleSendDM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Ensure pairwise secret is established with the recipient
+	// (needed to encrypt the DM message).
+	s.conn.EstablishPairwiseSecrets()
+
 	// Publish channel creation to DAG so it syncs to the peer.
 	// Include both members so the recipient's replay adds them to the channel.
 	chCreate := moltcbor.ChannelCreate{
