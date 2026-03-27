@@ -29,6 +29,7 @@ func (s *Server) registerConnectorRoutes(mux *http.ServeMux) {
 
 	// --- Messaging ---
 	mux.HandleFunc("POST /api/messages/send", s.handleSendMessage)
+	mux.HandleFunc("POST /api/dm/send", s.handleSendDM)
 	mux.HandleFunc("GET /api/messages/{channel_id}", s.handleGetMessages)
 	mux.HandleFunc("GET /api/activity", s.handleGetActivity)
 
@@ -477,6 +478,77 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeSuccess(w, r, map[string]any{"status": "sent"})
+}
+
+// --- Send DM ---
+
+type sendDMRequest struct {
+	RecipientKey string `json:"recipient_key"` // hex-encoded public key
+	Content      string `json:"content"`
+}
+
+func (s *Server) handleSendDM(w http.ResponseWriter, r *http.Request) {
+	var req sendDMRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, r, merrors.New("dm.send.invalid_request", merrors.Fatal,
+			"Invalid request body.", nil), 400)
+		return
+	}
+	if req.RecipientKey == "" || req.Content == "" {
+		writeError(w, r, merrors.New("dm.send.missing_fields", merrors.Fatal,
+			"Recipient key and content are required.", nil), 400)
+		return
+	}
+	if len(req.Content) > 32768 {
+		writeError(w, r, merrors.New("dm.send.too_large", merrors.Fatal,
+			"Message content exceeds maximum size of 32KB.", nil), 400)
+		return
+	}
+
+	recipientKeyBytes, err := hex.DecodeString(req.RecipientKey)
+	if err != nil || len(recipientKeyBytes) != 32 {
+		writeError(w, r, merrors.New("dm.send.invalid_recipient", merrors.Fatal,
+			"Invalid recipient key format.", nil), 400)
+		return
+	}
+
+	kp := s.conn.KeyPair()
+
+	// Get or create the DM channel
+	dm, err := channel.GetOrCreateDM(s.conn.Channels(), kp.Public, recipientKeyBytes)
+	if err != nil {
+		writeError(w, r, merrors.New("dm.send.channel_failed", merrors.Fatal,
+			fmt.Sprintf("Failed to create DM channel: %s", err.Error()), nil), 500)
+		return
+	}
+
+	// Publish channel creation to DAG so it syncs to the peer
+	chCreate := moltcbor.ChannelCreate{
+		ChannelID:   dm.ID,
+		Name:        fmt.Sprintf("dm-%s", req.RecipientKey[:8]),
+		Description: "",
+		ChannelType: dm.Type,
+	}
+	payload, err := moltcbor.Marshal(chCreate)
+	if err != nil {
+		writeError(w, r, merrors.New("dm.send.marshal_failed", merrors.Fatal,
+			"Failed to prepare DM channel.", nil), 500)
+		return
+	}
+	// Publish channel create (idempotent — DAG deduplicates by hash)
+	s.conn.PublishEntry(moltcbor.EntryTypeChannelCreate, payload)
+
+	// Send the message
+	if err := s.conn.SendMessage(dm.ID, []byte(req.Content), 0, "", "", "", ""); err != nil {
+		writeError(w, r, merrors.New("dm.send.failed", merrors.Fatal,
+			fmt.Sprintf("Failed to send DM: %s", err.Error()), nil), 500)
+		return
+	}
+
+	writeSuccess(w, r, map[string]any{
+		"status":     "sent",
+		"channel_id": fmt.Sprintf("%x", dm.ID),
+	})
 }
 
 // --- Get Messages ---

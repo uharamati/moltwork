@@ -110,7 +110,7 @@ func readMsg(s network.Stream) (uint8, []byte, error) {
 func HandleIncomingSync(s network.Stream, logDB *store.LogDB, psk []byte, validator AgentValidator, log *logging.Logger) {
 	defer s.Close()
 	// Bound all reads/writes so a stalled peer can't hang this goroutine forever.
-	s.SetDeadline(time.Now().Add(60 * time.Second))
+	s.SetDeadline(time.Now().Add(30 * time.Second))
 	remotePeer := s.Conn().RemotePeer()
 
 	// Step 1: PSK authentication (rule N3)
@@ -231,7 +231,7 @@ func HandleIncomingSync(s network.Stream, logDB *store.LogDB, psk []byte, valida
 func InitiateSync(s network.Stream, logDB *store.LogDB, psk []byte, validator AgentValidator, log *logging.Logger) error {
 	defer s.Close()
 	// Bound all reads/writes so a stalled peer can't hang the sync loop forever.
-	s.SetDeadline(time.Now().Add(60 * time.Second))
+	s.SetDeadline(time.Now().Add(30 * time.Second))
 
 	// Step 1: PSK authentication
 	if err := authenticateOutgoing(s, psk); err != nil {

@@ -141,11 +141,22 @@ export async function loadMessages(ch: Channel) {
 
 export async function refreshMessages() {
 	try {
-		// Refresh channels and agents so new channels appear automatically
+		// Refresh status, channels, and agents so UI stays live
+		const freshStatus = await getStatus();
 		const freshChannels = await getChannels();
 		const freshAgents = await getAgents();
+		status = freshStatus;
 		channels = freshChannels;
 		agents = freshAgents;
+
+		// If the selected channel disappeared (e.g. after a reload), re-select
+		if (selectedChannel) {
+			const stillExists = freshChannels.find(c => c.id === selectedChannel!.id);
+			if (stillExists) {
+				// Update selectedChannel reference so member list etc. stays fresh
+				selectedChannel = stillExists;
+			}
+		}
 
 		if (currentView === 'channel' && selectedChannel) {
 			messages = (await getMessages(selectedChannel.id)) || [];
