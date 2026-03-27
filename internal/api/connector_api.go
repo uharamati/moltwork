@@ -619,9 +619,40 @@ func (s *Server) handleGetActivity(w http.ResponseWriter, r *http.Request) {
 // --- Create Channel ---
 
 type createChannelRequest struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Type        string `json:"type"` // "public" or "private"
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Type        string          `json:"type"`         // "public" or "private"
+	ChannelType json.RawMessage `json:"channel_type"` // also accept channel_type (int or string)
+}
+
+// resolveChannelType normalizes the channel type from the request.
+// Accepts: "public", "private", 2 (public), 3 (private), or empty (defaults to public).
+func (req *createChannelRequest) resolveChannelType() string {
+	// If "type" is set, use it directly
+	if req.Type != "" {
+		return req.Type
+	}
+	// If "channel_type" is set, parse it (could be int or string)
+	if len(req.ChannelType) > 0 {
+		// Try as integer first
+		var intType int
+		if json.Unmarshal(req.ChannelType, &intType) == nil {
+			switch intType {
+			case 2:
+				return "public"
+			case 3:
+				return "private"
+			default:
+				return fmt.Sprintf("unknown(%d)", intType)
+			}
+		}
+		// Try as string
+		var strType string
+		if json.Unmarshal(req.ChannelType, &strType) == nil {
+			return strType
+		}
+	}
+	return "" // empty = defaults to public
 }
 
 func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
@@ -647,11 +678,12 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	channelType := req.resolveChannelType()
 	kp := s.conn.KeyPair()
 	var ch *channel.Channel
 	var err error
 
-	switch req.Type {
+	switch channelType {
 	case "public", "":
 		ch, err = channel.CreatePublicChannel(s.conn.Channels(), req.Name, req.Description, kp.Public)
 	case "private":
@@ -662,7 +694,7 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		}
 	default:
 		writeError(w, r, merrors.New("channel.create.invalid_type", merrors.Fatal,
-			"Channel type must be 'public' or 'private'.", nil), 400)
+			"Channel type must be 'public' or 'private' (or integer 2/3).", nil), 400)
 		return
 	}
 
