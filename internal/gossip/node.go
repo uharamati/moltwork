@@ -201,14 +201,18 @@ func (n *Node) syncWithPeers() {
 
 			// Connect if not already connected
 			if n.host.Network().Connectedness(pi.ID) != network.Connected {
-				if err := n.host.Connect(n.ctx, pi); err != nil {
+				connectCtx, connectCancel := context.WithTimeout(n.ctx, 10*time.Second)
+				defer connectCancel()
+				if err := n.host.Connect(connectCtx, pi); err != nil {
 					n.log.Debug("connect failed", map[string]any{"peer": pi.ID.String(), "error": err.Error()})
 					return
 				}
 			}
 
-			// Open sync stream
-			s, err := n.host.NewStream(n.ctx, pi.ID, protocol.ID(ProtocolID))
+			// Open sync stream with timeout
+			streamCtx, streamCancel := context.WithTimeout(n.ctx, 15*time.Second)
+			defer streamCancel()
+			s, err := n.host.NewStream(streamCtx, pi.ID, protocol.ID(ProtocolID))
 			if err != nil {
 				n.log.Debug("open stream failed", map[string]any{"peer": pi.ID.String(), "error": err.Error()})
 				return
