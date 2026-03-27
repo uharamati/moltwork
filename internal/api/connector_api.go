@@ -522,12 +522,14 @@ func (s *Server) handleSendDM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Publish channel creation to DAG so it syncs to the peer
+	// Publish channel creation to DAG so it syncs to the peer.
+	// Include both members so the recipient's replay adds them to the channel.
 	chCreate := moltcbor.ChannelCreate{
 		ChannelID:   dm.ID,
 		Name:        fmt.Sprintf("dm-%s", req.RecipientKey[:8]),
 		Description: "",
 		ChannelType: dm.Type,
+		Members:     [][]byte{kp.Public, recipientKeyBytes},
 	}
 	payload, err := moltcbor.Marshal(chCreate)
 	if err != nil {

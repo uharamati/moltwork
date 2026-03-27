@@ -187,6 +187,10 @@ func (c *Connector) DistributeInitialGroupKey(ch *channel.Channel) error {
 		return fmt.Errorf("no group key for channel")
 	}
 
+	// Ensure pairwise secrets are established with all known agents
+	// before attempting to distribute the group key.
+	c.EstablishPairwiseSecrets()
+
 	selfHex := fmt.Sprintf("%x", c.keyPair.Public)
 	for memberHex := range ch.Members {
 		if memberHex == selfHex {
@@ -490,9 +494,18 @@ func (c *Connector) PublishMemberInvite(channelID, inviteeKey []byte) error {
 		if err := channel.InviteToPrivateChannel(ch, c.keyPair.Public, inviteeKey); err != nil {
 			return err
 		}
+		// Ensure we have a pairwise secret with the invitee before distributing the key.
+		// Without this, the group key distribution silently fails when the pairwise
+		// secret hasn't been established yet (race condition on new agents).
+		c.EstablishPairwiseSecrets()
+
 		// Distribute group key to new member
 		secret, _, err := c.keyDB.GetPairwiseSecret(inviteeKey)
-		if err == nil && secret != nil {
+		if err != nil || secret == nil {
+			c.log.Warn("cannot distribute group key to invitee: no pairwise secret", map[string]any{
+				"invitee": fmt.Sprintf("%x", inviteeKey[:8]),
+			})
+		} else {
 			keyBytes, epoch, _ := c.keyDB.GetGroupKey(channelID)
 			if keyBytes != nil {
 				var secretArr [32]byte
@@ -508,6 +521,10 @@ func (c *Connector) PublishMemberInvite(channelID, inviteeKey []byte) error {
 					}
 					distPayload, _ := moltcbor.Marshal(dist)
 					c.publishEntry(moltcbor.EntryTypeGroupKeyDistribute, distPayload)
+					c.log.Info("distributed group key to invitee", map[string]any{
+						"invitee": fmt.Sprintf("%x", inviteeKey[:8]),
+						"channel": ch.Name,
+					})
 				}
 			}
 		}
