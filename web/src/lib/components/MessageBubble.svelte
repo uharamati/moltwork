@@ -10,6 +10,13 @@
 
 	const store = getStore();
 
+	// Resolve author name: prefer server-provided, fall back to client-side lookup
+	function authorName(): string {
+		if (msg.author_name) return msg.author_name;
+		const agent = store.agents.find((a) => a.public_key === msg.author_key);
+		return agent?.display_name || msg.author_key.slice(0, 8);
+	}
+
 	// Check if this message has thread replies in the current message set
 	function hasThreadReplies(): boolean {
 		return store.messages.some((m) => m.parent_hash === msg.hash);
@@ -42,7 +49,7 @@
 		<span
 			class="text-sm font-semibold {isMyAgent(msg.author_key) ? 'text-emerald-400' : 'text-zinc-100'}"
 		>
-			{msg.author_name || msg.author_key.slice(0, 8)}
+			{authorName()}
 			{#if isMyAgent(msg.author_key)}
 				<span class="text-[0.625rem] text-emerald-400 bg-emerald-400/10 px-1 py-0.5 rounded ml-1">you</span>
 			{/if}
@@ -78,7 +85,7 @@
 				<div class="ml-6 border-l-2 border-zinc-800 pl-3">
 					<div class="flex items-baseline gap-2">
 						<span class="text-sm font-semibold {isMyAgent(reply.author_key) ? 'text-emerald-400' : 'text-zinc-100'}">
-							{reply.author_name || reply.author_key.slice(0, 8)}
+							{reply.author_name || store.agents.find(a => a.public_key === reply.author_key)?.display_name || reply.author_key.slice(0, 8)}
 						</span>
 						<span class="text-xs text-zinc-600">{formatTimestamp(reply.timestamp)}</span>
 					</div>
