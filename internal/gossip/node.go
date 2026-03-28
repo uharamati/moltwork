@@ -3,6 +3,8 @@ package gossip
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -26,6 +28,8 @@ type Node struct {
 	limiter   *RateLimiter
 	validator AgentValidator
 
+	pskMu sync.RWMutex // protects psk field
+
 	lastSyncTime time.Time
 	syncMu       sync.RWMutex
 
@@ -33,12 +37,13 @@ type Node struct {
 	peerSyncMu sync.Mutex
 	activePeers map[peer.ID]bool
 
+	minPeers int // minimum peer count before warning
+
 	// Rate-limit peer count warnings
 	peerWarnMu  sync.Mutex
 	lastPeerWarn time.Time
 
 	onSyncComplete func() // called after entries are received via gossip
-	seenPeers      map[peer.ID]bool // deduplicate peer discovery logs
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -89,6 +94,11 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 
 	tracker := NewPeerTracker(cfg.Logger)
 
+	minPeers := cfg.MinPeers
+	if minPeers == 0 {
+		minPeers = 3
+	}
+
 	n := &Node{
 		host:        h,
 		logDB:       cfg.LogDB,
@@ -97,14 +107,23 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 		tracker:     tracker,
 		limiter:     NewRateLimiter(rateLimit, time.Minute),
 		validator:   cfg.Validator,
+		minPeers:    minPeers,
 		activePeers: make(map[peer.ID]bool),
-		seenPeers:   make(map[peer.ID]bool),
 		ctx:         ctx,
 		cancel:      cancel,
 	}
 
 	// Register sync protocol handler
 	h.SetStreamHandler(protocol.ID(ProtocolID), func(s network.Stream) {
+		defer func() {
+			if r := recover(); r != nil {
+				cfg.Logger.Error("panic in incoming sync handler", map[string]any{
+					"peer":  s.Conn().RemotePeer().String(),
+					"panic": fmt.Sprintf("%v", r),
+				})
+			}
+		}()
+
 		// Add the connecting peer to our tracker so we can sync back to them.
 		// Without this, incoming connections are handled but we never learn
 		// the peer's address for reverse sync (asymmetric gossip bug).
@@ -115,7 +134,7 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 			Addrs: []multiaddr.Multiaddr{remoteAddr},
 		})
 
-		HandleIncomingSync(s, cfg.LogDB, n.psk, n.validator, cfg.Logger)
+		HandleIncomingSync(s, cfg.LogDB, n.getPSK(), n.validator, cfg.Logger)
 		if n.onSyncComplete != nil {
 			n.onSyncComplete()
 		}
@@ -182,14 +201,13 @@ func (n *Node) syncWithPeers() {
 			activePeers++
 		}
 	}
-	minPeers := 3
-	if activePeers < minPeers {
+	if activePeers < n.minPeers {
 		n.peerWarnMu.Lock()
 		now := time.Now()
 		if now.Sub(n.lastPeerWarn) > time.Minute {
 			n.log.Warn("below minimum peer count", map[string]any{
 				"active":  activePeers,
-				"minimum": minPeers,
+				"minimum": n.minPeers,
 			})
 			n.lastPeerWarn = now
 		}
@@ -214,6 +232,14 @@ func (n *Node) syncWithPeers() {
 		// Each goroutine cleans up activePeers and calls onSyncComplete on success.
 		go func(pi peer.AddrInfo) {
 			defer func() {
+				// Recover from panics (e.g., malformed CBOR from a peer) so one
+				// bad peer can't crash the entire process.
+				if r := recover(); r != nil {
+					n.log.Error("panic in peer sync goroutine", map[string]any{
+						"peer":  pi.ID.String(),
+						"panic": fmt.Sprintf("%v", r),
+					})
+				}
 				n.peerSyncMu.Lock()
 				delete(n.activePeers, pi.ID)
 				n.peerSyncMu.Unlock()
@@ -238,8 +264,13 @@ func (n *Node) syncWithPeers() {
 				return
 			}
 
-			if err := InitiateSync(s, n.logDB, n.psk, n.validator, n.log); err != nil {
-				n.log.Debug("sync failed", map[string]any{"peer": pi.ID.String(), "error": err.Error()})
+			if err := InitiateSync(s, n.logDB, n.getPSK(), n.validator, n.log); err != nil {
+				if errors.Is(err, ErrNoNewEntries) {
+					// Sync completed but no new data — skip expensive rebuild
+					n.log.Debug("sync completed (no new entries)", map[string]any{"peer": pi.ID.String()})
+				} else {
+					n.log.Debug("sync failed", map[string]any{"peer": pi.ID.String(), "error": err.Error()})
+				}
 			} else {
 				n.log.Debug("sync completed", map[string]any{"peer": pi.ID.String()})
 				n.syncMu.Lock()
@@ -263,6 +294,11 @@ func (n *Node) Tracker() *PeerTracker {
 	return n.tracker
 }
 
+// MinPeers returns the configured minimum peer count.
+func (n *Node) MinPeers() int {
+	return n.minPeers
+}
+
 // LastSyncTime returns the time of the last completed sync cycle.
 func (n *Node) LastSyncTime() time.Time {
 	n.syncMu.RLock()
@@ -274,6 +310,15 @@ func (n *Node) LastSyncTime() time.Time {
 // The connector uses this to rebuild in-memory state (registry, channels, etc.)
 func (n *Node) SetOnSyncComplete(fn func()) {
 	n.onSyncComplete = fn
+}
+
+// getPSK returns the current PSK, protected by the read lock.
+func (n *Node) getPSK() []byte {
+	n.pskMu.RLock()
+	defer n.pskMu.RUnlock()
+	psk := make([]byte, len(n.psk))
+	copy(psk, n.psk)
+	return psk
 }
 
 // UpdatePSK atomically swaps the PSK used for gossip authentication.
@@ -290,6 +335,8 @@ func (n *Node) SetOnSyncComplete(fn func()) {
 // This is safe because: (a) the revoked agent never receives the new PSK, and
 // (b) existing agents will sync the PSKDistribution entry within 1-2 gossip cycles.
 func (n *Node) UpdatePSK(newPSK []byte) {
+	n.pskMu.Lock()
+	defer n.pskMu.Unlock()
 	n.psk = newPSK
 }
 

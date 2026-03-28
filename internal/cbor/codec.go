@@ -37,8 +37,8 @@ func init() {
 	decOpts := cbor.DecOptions{
 		DupMapKey:   cbor.DupMapKeyEnforcedAPF, // reject duplicate keys
 		MaxNestedLevels: MaxNestingDepth,
-		MaxArrayElements: 10000,
-		MaxMapPairs:      10000,
+		MaxArrayElements: 1000,
+		MaxMapPairs:      500,
 		IndefLength:      cbor.IndefLengthForbidden, // reject indefinite-length (rule B1)
 		ExtraReturnErrors: cbor.ExtraDecErrorUnknownField, // reject unknown fields
 	}

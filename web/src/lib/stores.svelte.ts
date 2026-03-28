@@ -28,7 +28,7 @@ let tokenInput = $state('');
 let allMyMessages = $state<{ channel: Channel; msg: Message }[]>([]);
 let allMyActivity = $state<Message[]>([]);
 let loading = $state(false);
-let refreshErrors = $state(0);
+let consecutiveRefreshErrors = $state(0);
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 let messageRequestId = 0; // Monotonic counter to discard stale channel responses
 let expandedThreads = $state<Set<string>>(new Set()); // message hashes with expanded threads
@@ -97,7 +97,7 @@ export async function connect() {
 }
 
 // Try to restore session from a saved token or ?token= URL param.
-export async function tryRestore() {
+export async function initializeSession() {
 	// Check URL for ?token= param (initial browser open)
 	const urlToken = new URLSearchParams(window.location.search).get('token');
 	if (urlToken) {
@@ -119,6 +119,8 @@ export async function selectChannel(ch: Channel) {
 	currentView = 'channel';
 	selectedChannel = ch;
 	rightTab = 'participants';
+	messageLimit = 100;
+	hasMoreMessages = true;
 	await loadMessages(ch);
 }
 
@@ -136,6 +138,32 @@ export async function loadMessages(ch: Channel) {
 		error = 'Failed to load messages.';
 	} finally {
 		if (reqId === messageRequestId) loading = false;
+	}
+}
+
+let loadingMore = $state(false);
+let hasMoreMessages = $state(true);
+let messageLimit = 100;
+
+export function getLoadingMore() { return loadingMore; }
+export function getHasMoreMessages() { return hasMoreMessages; }
+
+export async function loadMoreMessages() {
+	if (!selectedChannel || loadingMore || !hasMoreMessages) return;
+	loadingMore = true;
+	try {
+		const prevCount = messages.length;
+		messageLimit += 100;
+		const result = (await getMessages(selectedChannel.id, 0, messageLimit)) || [];
+		messages = result;
+		// If we didn't get any new messages, there are no more to load
+		if (result.length <= prevCount) {
+			hasMoreMessages = false;
+		}
+	} catch {
+		error = 'Failed to load older messages.';
+	} finally {
+		loadingMore = false;
 	}
 }
 
@@ -161,7 +189,7 @@ export async function refreshMessages() {
 		if (currentView === 'channel' && selectedChannel) {
 			messages = (await getMessages(selectedChannel.id)) || [];
 		}
-		refreshErrors = 0;
+		consecutiveRefreshErrors = 0;
 	} catch (e: any) {
 		if (e?.status === 401) {
 			cleanupPolling();
@@ -173,11 +201,11 @@ export async function refreshMessages() {
 			// Rate limited — skip this poll cycle, don't count as error
 			return;
 		}
-		refreshErrors++;
-		if (refreshErrors >= 5) {
+		consecutiveRefreshErrors++;
+		if (consecutiveRefreshErrors >= 5) {
 			cleanupPolling();
 			error = e?.message || 'Connection lost. Refresh the page to reconnect.';
-		} else if (refreshErrors >= 3) {
+		} else if (consecutiveRefreshErrors >= 3) {
 			error = e?.message || 'Connection lost. Messages may be stale.';
 		}
 	}
@@ -208,6 +236,7 @@ export async function showMyActivity() {
 		allMyMessages = collected;
 	} catch {
 		error = 'Failed to load activity.';
+		allMyActivity = [];
 	}
 	loading = false;
 }
@@ -243,7 +272,7 @@ export function logout() {
 	tokenInput = '';
 	allMyMessages = [];
 	allMyActivity = [];
-	refreshErrors = 0;
+	consecutiveRefreshErrors = 0;
 	try { sessionStorage.removeItem('moltwork_token'); } catch {}
 }
 

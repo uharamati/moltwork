@@ -49,8 +49,32 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
+	limit := 200
+	offset := 0
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 && v <= 1000 {
+			limit = v
+		}
+	}
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if v, err := strconv.Atoi(o); err == nil && v >= 0 {
+			offset = v
+		}
+	}
+
 	channels := s.conn.Channels().List(s.conn.KeyPair().Public)
 	registry := s.conn.Registry()
+
+	// Apply pagination
+	if offset >= len(channels) {
+		writeSuccess(w, r, []map[string]any{})
+		return
+	}
+	end := offset + limit
+	if end > len(channels) {
+		end = len(channels)
+	}
+	channels = channels[offset:end]
 
 	result := make([]map[string]any, 0, len(channels))
 	for _, ch := range channels {
@@ -112,8 +136,45 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
+	limit := 200
+	offset := 0
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 && v <= 1000 {
+			limit = v
+		}
+	}
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if v, err := strconv.Atoi(o); err == nil && v >= 0 {
+			offset = v
+		}
+	}
+
 	agents := s.conn.Registry().All()
 	myKey := fmt.Sprintf("%x", s.conn.KeyPair().Public)
+
+	// Apply pagination
+	if offset >= len(agents) {
+		// Still need to check if self is included
+		result := []map[string]any{}
+		result = append(result, map[string]any{
+			"public_key":       myKey,
+			"agent_id":         identity.AgentID(s.conn.KeyPair().Public),
+			"display_name":     "",
+			"human_name":       "",
+			"platform":         "",
+			"platform_user_id": "",
+			"title":            "",
+			"team":             "",
+			"revoked":          false,
+		})
+		writeSuccess(w, r, result)
+		return
+	}
+	end := offset + limit
+	if end > len(agents) {
+		end = len(agents)
+	}
+	agents = agents[offset:end]
 
 	result := make([]map[string]any, 0, len(agents))
 	selfFound := false
@@ -157,19 +218,21 @@ func (s *Server) handleAgentDetail(w http.ResponseWriter, r *http.Request) {
 	idHex := r.PathValue("id")
 	pubKey, err := hex.DecodeString(idHex)
 	if err != nil || len(pubKey) != 32 {
-		httpError(w, "invalid agent ID", 400)
+		writeError(w, r, fmt.Errorf("invalid agent ID"), 400)
 		return
 	}
 
 	agent := s.conn.Registry().GetByPublicKey(pubKey)
 	if agent == nil {
-		httpError(w, "agent not found", 404)
+		writeError(w, r, fmt.Errorf("agent not found"), 404)
 		return
 	}
 
 	result := map[string]any{
 		"public_key":       idHex,
+		"agent_id":         identity.AgentID(agent.PublicKey),
 		"display_name":     agent.DisplayName,
+		"human_name":       agent.HumanName,
 		"platform":         agent.Platform,
 		"platform_user_id": agent.PlatformUserID,
 		"title":            agent.Title,
@@ -227,20 +290,26 @@ func (s *Server) handleGetOrgRelationships(w http.ResponseWriter, r *http.Reques
 	agents := s.conn.Registry().All()
 	orgMap := s.conn.OrgMap()
 
+	// Build lookup map for O(1) agent resolution by public key hex
+	agentByKey := make(map[string]*identity.Agent, len(agents))
+	for _, a := range agents {
+		agentByKey[fmt.Sprintf("%x", a.PublicKey)] = a
+	}
+
 	relationships := make([]map[string]any, 0)
 	for _, agent := range agents {
 		rel := orgMap.GetManager(agent.PublicKey)
 		if rel == nil {
 			continue
 		}
-		managerAgent := s.conn.Registry().GetByPublicKey(rel.ManagerPubKey)
+		managerKeyHex := fmt.Sprintf("%x", rel.ManagerPubKey)
 		entry := map[string]any{
 			"subject_key":  fmt.Sprintf("%x", rel.SubjectPubKey),
-			"manager_key":  fmt.Sprintf("%x", rel.ManagerPubKey),
+			"manager_key":  managerKeyHex,
 			"subject_name": agent.DisplayName,
 			"timestamp":    rel.Timestamp,
 		}
-		if managerAgent != nil {
+		if managerAgent, ok := agentByKey[managerKeyHex]; ok {
 			entry["manager_name"] = managerAgent.DisplayName
 		}
 		relationships = append(relationships, entry)
@@ -254,7 +323,7 @@ func (s *Server) handleGetOrgRelationships(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleGetAttestations(w http.ResponseWriter, r *http.Request) {
 	entries, err := s.conn.LogDB().EntriesByType(int(moltcbor.EntryTypeAttestation))
 	if err != nil {
-		httpError(w, err.Error(), 500)
+		writeError(w, r, err, 500)
 		return
 	}
 
@@ -265,13 +334,13 @@ func (s *Server) handleGetAgentAttestations(w http.ResponseWriter, r *http.Reque
 	agentIDHex := r.PathValue("agent_id")
 	agentKey, err := hex.DecodeString(agentIDHex)
 	if err != nil {
-		httpError(w, "invalid agent ID", 400)
+		writeError(w, r, fmt.Errorf("invalid agent ID"), 400)
 		return
 	}
 
 	entries, err := s.conn.LogDB().EntriesByType(int(moltcbor.EntryTypeAttestation))
 	if err != nil {
-		httpError(w, err.Error(), 500)
+		writeError(w, r, err, 500)
 		return
 	}
 
@@ -317,22 +386,9 @@ func (s *Server) decodeAttestationEntries(entries []*store.RawEntry) []map[strin
 }
 
 // decodePayloadFromRaw extracts the inner payload from a raw log entry.
+// Delegates to the shared implementation in the cbor package.
 func decodePayloadFromRaw(raw *store.RawEntry) []byte {
-	var sigData struct {
-		Parents  [][]byte `cbor:"1,keyasint"`
-		Envelope []byte   `cbor:"2,keyasint"`
-		Time     int64    `cbor:"3,keyasint"`
-	}
-	if err := moltcbor.Unmarshal(raw.RawCBOR, &sigData); err != nil {
-		return nil
-	}
-
-	var env moltcbor.Envelope
-	if err := moltcbor.Unmarshal(sigData.Envelope, &env); err != nil {
-		return nil
-	}
-
-	return env.Payload
+	return moltcbor.DecodePayload(raw.RawCBOR)
 }
 
 func writeJSON(w http.ResponseWriter, data any) {
@@ -353,15 +409,15 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit := 50
+	limit := 100
 	if l := r.URL.Query().Get("limit"); l != "" {
-		if v, err := strconv.Atoi(l); err == nil && v > 0 && v <= 200 {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 && v <= 500 {
 			limit = v
 		}
 	}
 
-	// Search across all activity
-	allMsgs, err := s.conn.GetNewActivity(0, 10000)
+	// Search across recent activity (capped to avoid scanning the entire log)
+	allMsgs, err := s.conn.GetNewActivity(0, 500)
 	if err != nil {
 		writeError(w, r, err, 500)
 		return

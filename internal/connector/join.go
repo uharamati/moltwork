@@ -261,10 +261,15 @@ func (c *Connector) determineAdvertiseAddr() string {
 			port := c.cfg.ListenPort
 			if port == 0 && c.node != nil {
 				for _, ma := range c.node.Host().Addrs() {
-					if p, err := ma.ValueForProtocol(multiaddr.P_TCP); err == nil {
-						fmt.Sscanf(p, "%d", &port)
-						break
+					p, err := ma.ValueForProtocol(multiaddr.P_TCP)
+					if err != nil {
+						continue
 					}
+					if _, err := fmt.Sscanf(p, "%d", &port); err != nil {
+						c.log.Warn("invalid TCP port in multiaddr", map[string]any{"value": p, "error": err.Error()})
+						continue
+					}
+					break
 				}
 			}
 			addr = fmt.Sprintf("/ip4/%s/tcp/%d", addr, port)
@@ -312,10 +317,14 @@ func (c *Connector) determineAdvertiseAddr() string {
 					// Get the actual port from the libp2p host
 					hostAddrs := c.node.Host().Addrs()
 					for _, ma := range hostAddrs {
-						if p, err := ma.ValueForProtocol(multiaddr.P_TCP); err == nil {
-							fmt.Sscanf(p, "%d", &port)
-							break
+						p, err := ma.ValueForProtocol(multiaddr.P_TCP)
+						if err != nil {
+							continue
 						}
+						if _, err := fmt.Sscanf(p, "%d", &port); err != nil {
+							continue
+						}
+						break
 					}
 				}
 				if port > 0 {

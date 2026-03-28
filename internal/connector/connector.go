@@ -45,11 +45,32 @@ type Connector struct {
 	attestLoop *identity.AttestationLoop
 	diagDB     *store.DiagDB
 
-	pairwiseMu   sync.Mutex // protects EstablishPairwiseSecrets
+	rebuildMu    sync.RWMutex // protects state rebuild (registry, channels, org) from concurrent API reads
+	pairwiseMu   sync.Mutex   // protects EstablishPairwiseSecrets
 	syncPeerURLs []string   // HTTP sync peer URLs (from config + rendezvous)
 	syncRebuild  chan struct{} // debounce channel for onSyncComplete rebuilds
 	displayName          string // agent's display name, set during join
 	cachedPlatformUserID string // cached to avoid O(n) scan every call
+
+	// Deleted message hash cache (TTL-based, rebuilt every 5s)
+	deletedHashCache     map[string]bool
+	deletedHashCacheTime time.Time
+	deletedHashCacheMu   sync.RWMutex
+
+	// Edited message cache (TTL-based, rebuilt every 5s)
+	editedMsgCache     map[string]string // message_hash_hex -> latest content
+	editedMsgCacheTime time.Time
+	editedMsgCacheMu   sync.RWMutex
+
+	// Reaction cache (TTL-based, rebuilt every 5s)
+	reactionCache     map[string]map[string][]string // message_hash_hex -> emoji -> [author_key_hex]
+	reactionCacheTime time.Time
+	reactionCacheMu   sync.RWMutex
+
+	// Pin cache (TTL-based, rebuilt every 5s)
+	pinCache     map[string]map[string]bool // channel_id_hex -> set of message_hash_hex
+	pinCacheTime time.Time
+	pinCacheMu   sync.RWMutex
 
 	// Subscriber notification: broadcast when new entries arrive via gossip or local publish.
 	// API handlers (SSE, long-polling) subscribe to get notified of new data.
@@ -81,8 +102,15 @@ func (c *Connector) Unsubscribe(ch chan struct{}) {
 	c.subMu.Unlock()
 }
 
+// RebuildRLock acquires a read lock on the state rebuild mutex.
+// API handlers should call this before reading registry/channel/org state
+// to avoid reading partially-rebuilt state during gossip sync.
+func (c *Connector) RebuildRLock()   { c.rebuildMu.RLock() }
+func (c *Connector) RebuildRUnlock() { c.rebuildMu.RUnlock() }
+
 // notifySubscribers sends a non-blocking signal to all subscribers.
 func (c *Connector) notifySubscribers() {
+	c.invalidateDeletedCache()
 	c.subMu.Lock()
 	for ch := range c.subscribers {
 		select {
@@ -225,11 +253,13 @@ func (c *Connector) Start(ctx context.Context) error {
 					}
 				}
 			rebuild:
+				c.rebuildMu.Lock()
 				c.registry.LoadFromDB(c.logDB)
 				c.replayChannelState()
 				c.replayOrgRelationships()
 				c.EstablishPairwiseSecrets()
 				c.replayGroupKeyDistributes()
+				c.rebuildMu.Unlock()
 				c.notifySubscribers()
 			}
 		}

@@ -102,7 +102,8 @@ func NewServer(conn *connector.Connector, port int) (*Server, error) {
 	s.server = &http.Server{
 		Handler:      correlationMiddleware(securityHeaders(authMiddleware(mux, token, log))),
 		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 6 * time.Minute, // /api/join/rendezvous waits for Slack PSK exchange
+		WriteTimeout: 0, // SSE and long-poll handlers manage their own timeouts
+		IdleTimeout:  2 * time.Minute,
 	}
 
 	return s, nil
@@ -162,7 +163,7 @@ func (s *Server) StartPublicSync(port int) error {
 	s.publicListener = listener
 
 	s.publicServer = &http.Server{
-		Handler:      correlationMiddleware(mux),
+		Handler:      correlationMiddleware(securityHeaders(mux)),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}

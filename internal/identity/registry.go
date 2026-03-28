@@ -10,12 +10,13 @@ import (
 	"moltwork/internal/store"
 )
 
-// AgentID returns a short 5-character hex identifier derived from a public key.
+// AgentID returns a short 8-character hex identifier derived from a public key.
 // Deterministic — both sides compute the same ID from the same key.
 // Used for human-readable disambiguation when display names collide.
+// 8 hex chars = 32 bits → birthday collision probability ~50% at ~65K agents.
 func AgentID(pubKey []byte) string {
 	h := crypto.Hash(append([]byte("agent-id:"), pubKey...))
-	return fmt.Sprintf("%x", h[:3])[:5] // first 5 hex chars of hash
+	return fmt.Sprintf("%x", h[:4]) // first 8 hex chars (4 bytes) of hash
 }
 
 // Agent represents a registered agent in the workspace.
@@ -96,7 +97,69 @@ func (r *Registry) LoadFromDB(logDB *store.LogDB) error {
 		}
 	}
 
+	// Process AgentUpdate entries — apply profile changes after initial registration.
+	// The most recent update (by timestamp) wins since entries are ordered by created_at.
+	updateEntries, err := logDB.EntriesByType(int(moltcbor.EntryTypeAgentUpdate))
+	if err != nil {
+		return fmt.Errorf("load agent updates: %w", err)
+	}
+
+	for _, raw := range updateEntries {
+		if err := crypto.Verify(raw.AuthorKey, raw.RawCBOR, raw.Signature); err != nil {
+			continue
+		}
+
+		var sigData struct {
+			Parents  [][]byte `cbor:"1,keyasint"`
+			Envelope []byte   `cbor:"2,keyasint"`
+			Time     int64    `cbor:"3,keyasint"`
+		}
+		if err := moltcbor.Unmarshal(raw.RawCBOR, &sigData); err != nil {
+			continue
+		}
+
+		var innerEnv moltcbor.Envelope
+		if err := moltcbor.Unmarshal(sigData.Envelope, &innerEnv); err != nil {
+			continue
+		}
+
+		var upd moltcbor.AgentUpdate
+		if err := moltcbor.Unmarshal(innerEnv.Payload, &upd); err != nil {
+			continue
+		}
+
+		// Only the agent itself can update its own profile
+		if !crypto.ConstantTimeEqual(raw.AuthorKey, upd.PublicKey) {
+			continue
+		}
+
+		r.ApplyAgentUpdate(&upd)
+	}
+
 	return nil
+}
+
+// ApplyAgentUpdate applies profile changes to a registered agent.
+func (r *Registry) ApplyAgentUpdate(upd *moltcbor.AgentUpdate) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	keyStr := fmt.Sprintf("%x", upd.PublicKey)
+	agent, ok := r.byKey[keyStr]
+	if !ok {
+		return
+	}
+	if upd.DisplayName != "" {
+		agent.DisplayName = upd.DisplayName
+	}
+	if upd.Title != "" {
+		agent.Title = upd.Title
+	}
+	if upd.Team != "" {
+		agent.Team = upd.Team
+	}
+	if upd.HumanName != "" {
+		agent.HumanName = upd.HumanName
+	}
 }
 
 // maxAgents is the hard limit on registry size to prevent memory exhaustion.

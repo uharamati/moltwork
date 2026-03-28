@@ -60,6 +60,18 @@ func (m *Manager) Create(ch *Channel) error {
 	return nil
 }
 
+// UpdateName updates the name mapping in the manager when a channel is renamed.
+func (m *Manager) UpdateName(ch *Channel, oldName, newName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if oldName != "" {
+		delete(m.byName, strings.ToLower(oldName))
+	}
+	if newName != "" {
+		m.byName[strings.ToLower(newName)] = fmt.Sprintf("%x", ch.ID)
+	}
+}
+
 // Get returns a channel by ID.
 func (m *Manager) Get(id []byte) *Channel {
 	m.mu.RLock()
@@ -145,6 +157,19 @@ func (ch *Channel) DemoteAdmin(pubKey ed25519.PublicKey) {
 	ch.mu.Lock()
 	defer ch.mu.Unlock()
 	delete(ch.Admins, fmt.Sprintf("%x", pubKey))
+}
+
+// Update changes the channel's name and/or description.
+// Empty strings are ignored (no change).
+func (ch *Channel) Update(name, description string) {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	if name != "" {
+		ch.Name = name
+	}
+	if description != "" {
+		ch.Description = description
+	}
 }
 
 // MemberCount returns the number of members.

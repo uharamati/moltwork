@@ -95,6 +95,7 @@ func (c *Connector) replayChannelState() {
 		int(moltcbor.EntryTypeAdminDemote),
 		int(moltcbor.EntryTypeChannelArchive),
 		int(moltcbor.EntryTypeChannelUnarchive),
+		int(moltcbor.EntryTypeChannelUpdate),
 	}
 
 	var allEntries []*store.RawEntry
@@ -147,6 +148,8 @@ func (c *Connector) replayChannelState() {
 			c.replayArchive(raw, true)
 		case moltcbor.EntryTypeChannelUnarchive:
 			c.replayArchive(raw, false)
+		case moltcbor.EntryTypeChannelUpdate:
+			c.replayChannelUpdate(raw)
 		}
 	}
 
@@ -316,6 +319,34 @@ func (c *Connector) replayArchive(raw *store.RawEntry, isArchive bool) {
 	ch.Archived = isArchive
 }
 
+func (c *Connector) replayChannelUpdate(raw *store.RawEntry) {
+	payload := decodePayload(raw)
+	if payload == nil {
+		return
+	}
+
+	var cu moltcbor.ChannelUpdate
+	if err := moltcbor.Unmarshal(payload, &cu); err != nil {
+		return
+	}
+
+	ch := c.channels.Get(cu.ChannelID)
+	if ch == nil {
+		return
+	}
+
+	// Only admins can update channels
+	if !ch.IsAdmin(raw.AuthorKey) {
+		return
+	}
+
+	oldName := ch.Name
+	ch.Update(cu.Name, cu.Description)
+	if cu.Name != "" && cu.Name != oldName {
+		c.channels.UpdateName(ch, oldName, cu.Name)
+	}
+}
+
 // replayGroupKeyDistributes processes GroupKeyDistribute entries from the log,
 // extracting and storing group keys for private channels targeted at this agent.
 // Without this, private channel invites are broken — the agent receives the entry
@@ -413,6 +444,16 @@ func (c *Connector) replayPairwiseKeyExchanges() {
 		return
 	}
 
+	// Sort by creation time to replay in chronological order, not DB insertion
+	// order. Out-of-order gossip delivery can cause DB order to diverge from
+	// timestamp order, which would break epoch sequencing.
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].CreatedAt != entries[j].CreatedAt {
+			return entries[i].CreatedAt < entries[j].CreatedAt
+		}
+		return fmt.Sprintf("%x", entries[i].Hash) < fmt.Sprintf("%x", entries[j].Hash)
+	})
+
 	processed := 0
 	for _, raw := range entries {
 		payload := decodePayload(raw)
@@ -437,24 +478,9 @@ func (c *Connector) replayPairwiseKeyExchanges() {
 // --- Decoding helpers ---
 
 // decodePayload extracts the inner payload bytes from a raw log entry.
-// Entry structure: SignableWrapper { Parents, Envelope bytes, Time }
-// Envelope: { Version, Type, Payload bytes }
+// Delegates to the shared implementation in the cbor package.
 func decodePayload(raw *store.RawEntry) []byte {
-	var sigData struct {
-		Parents  [][]byte `cbor:"1,keyasint"`
-		Envelope []byte   `cbor:"2,keyasint"`
-		Time     int64    `cbor:"3,keyasint"`
-	}
-	if err := moltcbor.Unmarshal(raw.RawCBOR, &sigData); err != nil {
-		return nil
-	}
-
-	var env moltcbor.Envelope
-	if err := moltcbor.Unmarshal(sigData.Envelope, &env); err != nil {
-		return nil
-	}
-
-	return env.Payload
+	return moltcbor.DecodePayload(raw.RawCBOR)
 }
 
 func decodeRevocationEntry(raw *store.RawEntry) *moltcbor.Revocation {

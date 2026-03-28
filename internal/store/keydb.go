@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -129,7 +130,43 @@ func (s *KeyDB) migrate() error {
 	}
 
 	// Add rotated_at column if it doesn't exist (migration for existing databases)
-	s.db.Exec("ALTER TABLE pairwise_secrets ADD COLUMN rotated_at INTEGER NOT NULL DEFAULT 0")
+	if _, err := s.db.Exec("ALTER TABLE pairwise_secrets ADD COLUMN rotated_at INTEGER NOT NULL DEFAULT 0"); err != nil {
+		// Ignore "duplicate column" errors — the column already exists
+		if !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("alter pairwise_secrets: %w", err)
+		}
+	}
+
+	// Read receipts — local only, not gossiped
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS read_receipts (
+		channel_id TEXT NOT NULL,
+		last_read_hash TEXT NOT NULL,
+		last_read_ts INTEGER NOT NULL,
+		PRIMARY KEY (channel_id)
+	)`); err != nil {
+		return fmt.Errorf("create read_receipts: %w", err)
+	}
+
+	// Quorum revocation proposals
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS revocation_proposals (
+		id TEXT PRIMARY KEY,
+		target_key TEXT NOT NULL,
+		reason INTEGER NOT NULL,
+		created_at INTEGER NOT NULL,
+		status TEXT NOT NULL DEFAULT 'pending'
+	)`); err != nil {
+		return fmt.Errorf("create revocation_proposals: %w", err)
+	}
+
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS revocation_signatures (
+		proposal_id TEXT NOT NULL,
+		signer_key TEXT NOT NULL,
+		signature TEXT NOT NULL,
+		PRIMARY KEY (proposal_id, signer_key),
+		FOREIGN KEY (proposal_id) REFERENCES revocation_proposals(id)
+	)`); err != nil {
+		return fmt.Errorf("create revocation_signatures: %w", err)
+	}
 
 	return nil
 }
@@ -292,6 +329,112 @@ func (s *KeyDB) GetRendezvousChannelID() string {
 		return ""
 	}
 	return id
+}
+
+// --- Read Receipts ---
+
+// SetReadReceipt stores the last read position for a channel.
+func (s *KeyDB) SetReadReceipt(channelID string, messageHash string, timestamp int64) error {
+	_, err := s.db.Exec(
+		"INSERT OR REPLACE INTO read_receipts (channel_id, last_read_hash, last_read_ts) VALUES (?, ?, ?)",
+		channelID, messageHash, timestamp,
+	)
+	return err
+}
+
+// GetReadReceipt retrieves the last read position for a channel.
+func (s *KeyDB) GetReadReceipt(channelID string) (messageHash string, timestamp int64, err error) {
+	err = s.db.QueryRow(
+		"SELECT last_read_hash, last_read_ts FROM read_receipts WHERE channel_id = ?",
+		channelID,
+	).Scan(&messageHash, &timestamp)
+	if err == sql.ErrNoRows {
+		return "", 0, nil
+	}
+	return
+}
+
+// --- Quorum Revocation Proposals ---
+
+// RevocationSig represents a single signature on a revocation proposal.
+type RevocationSig struct {
+	SignerKey string `json:"signer_key"`
+	Signature string `json:"signature"`
+}
+
+// RevocationProposal represents a pending quorum revocation proposal.
+type RevocationProposal struct {
+	ID        string `json:"id"`
+	TargetKey string `json:"target_key"`
+	Reason    int    `json:"reason"`
+	CreatedAt int64  `json:"created_at"`
+	Status    string `json:"status"`
+}
+
+// CreateRevocationProposal stores a new revocation proposal.
+func (s *KeyDB) CreateRevocationProposal(id, targetKey string, reason int, createdAt int64) error {
+	_, err := s.db.Exec(
+		"INSERT INTO revocation_proposals (id, target_key, reason, created_at, status) VALUES (?, ?, ?, ?, 'pending')",
+		id, targetKey, reason, createdAt,
+	)
+	return err
+}
+
+// GetRevocationProposal retrieves a proposal and its signatures.
+func (s *KeyDB) GetRevocationProposal(id string) (targetKey string, reason int, status string, sigs []RevocationSig, err error) {
+	err = s.db.QueryRow(
+		"SELECT target_key, reason, status FROM revocation_proposals WHERE id = ?", id,
+	).Scan(&targetKey, &reason, &status)
+	if err != nil {
+		return "", 0, "", nil, err
+	}
+
+	rows, err := s.db.Query(
+		"SELECT signer_key, signature FROM revocation_signatures WHERE proposal_id = ?", id,
+	)
+	if err != nil {
+		return targetKey, reason, status, nil, nil
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var sig RevocationSig
+		if err := rows.Scan(&sig.SignerKey, &sig.Signature); err != nil {
+			continue
+		}
+		sigs = append(sigs, sig)
+	}
+	return targetKey, reason, status, sigs, nil
+}
+
+// AddRevocationSignature adds a signature to a proposal.
+func (s *KeyDB) AddRevocationSignature(proposalID, signerKey, signature string) error {
+	_, err := s.db.Exec(
+		"INSERT OR REPLACE INTO revocation_signatures (proposal_id, signer_key, signature) VALUES (?, ?, ?)",
+		proposalID, signerKey, signature,
+	)
+	return err
+}
+
+// ListRevocationProposals returns all revocation proposals.
+func (s *KeyDB) ListRevocationProposals() ([]RevocationProposal, error) {
+	rows, err := s.db.Query(
+		"SELECT id, target_key, reason, created_at, status FROM revocation_proposals ORDER BY created_at DESC",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var proposals []RevocationProposal
+	for rows.Next() {
+		var p RevocationProposal
+		if err := rows.Scan(&p.ID, &p.TargetKey, &p.Reason, &p.CreatedAt, &p.Status); err != nil {
+			continue
+		}
+		proposals = append(proposals, p)
+	}
+	return proposals, rows.Err()
 }
 
 // Close closes the database.

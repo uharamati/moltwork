@@ -2,6 +2,7 @@ package gossip
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -24,8 +25,8 @@ type AgentValidator interface {
 
 // SyncMessage types
 const (
-	MsgTypeHashSet  uint8 = 1 // "here are my entry hashes"
-	MsgTypeRequest  uint8 = 2 // "send me these entries"
+	MsgTypeHashSet uint8 = 1 // "here are my entry hashes"
+	// MsgTypeRequest uint8 = 2 — reserved, unused in v1 protocol
 	MsgTypeEntries  uint8 = 3 // "here are the entries you asked for"
 	MsgTypePSKProof uint8 = 4 // PSK authentication
 	MsgTypeDone     uint8 = 5 // sync complete
@@ -35,15 +36,20 @@ const (
 // Prevents OOM from malicious peers sending unbounded hash lists.
 const maxHashSetSize = 100_000
 
+// ErrNoNewEntries is returned by InitiateSync when the sync completed
+// successfully but no new entries were received. Callers can use this to
+// skip expensive state rebuilds when nothing changed.
+var ErrNoNewEntries = errors.New("no new entries")
+
 // HashSetMsg contains the set of entry hashes a node has.
 type HashSetMsg struct {
 	Hashes [][]byte `cbor:"1,keyasint"`
 }
 
-// RequestMsg asks for specific entries by hash.
-type RequestMsg struct {
-	Wanted [][]byte `cbor:"1,keyasint"`
-}
+// RequestMsg is reserved for future use (was part of MsgTypeRequest, unused in v1).
+// type RequestMsg struct {
+// 	Wanted [][]byte `cbor:"1,keyasint"`
+// }
 
 // EntriesMsg contains raw entries being synced.
 type EntriesMsg struct {
@@ -110,7 +116,7 @@ func readMsg(s network.Stream) (uint8, []byte, error) {
 func HandleIncomingSync(s network.Stream, logDB *store.LogDB, psk []byte, validator AgentValidator, log *logging.Logger) {
 	defer s.Close()
 	// Bound all reads/writes so a stalled peer can't hang this goroutine forever.
-	s.SetDeadline(time.Now().Add(30 * time.Second))
+	s.SetDeadline(time.Now().Add(60 * time.Second))
 	remotePeer := s.Conn().RemotePeer()
 
 	// Step 1: PSK authentication (rule N3)
@@ -198,40 +204,76 @@ func HandleIncomingSync(s network.Stream, logDB *store.LogDB, psk []byte, valida
 	}
 
 	if theyNeed {
-		entriesMsg := EntriesMsg{Entries: toSend}
-		entriesBytes, err := moltcbor.Marshal(entriesMsg)
-		if err != nil {
-			log.Error("marshal entries", map[string]any{"error": err.Error()})
-			return
+		// Send entries in chunks to stay under the 4MB message limit
+		const maxBatchBytes = 3 * 1024 * 1024 // 3MB to leave headroom
+		var batch []RawSyncEntry
+		batchSize := 0
+		for _, e := range toSend {
+			entrySize := len(e.RawCBOR) + len(e.Hash) + len(e.AuthorKey) + len(e.Signature) + 100 // overhead
+			if batchSize+entrySize > maxBatchBytes && len(batch) > 0 {
+				// Send this batch
+				entriesMsg := EntriesMsg{Entries: batch}
+				entriesBytes, err := moltcbor.Marshal(entriesMsg)
+				if err != nil {
+					log.Error("marshal entries", map[string]any{"error": err.Error()})
+					return
+				}
+				if err := writeMsg(s, MsgTypeEntries, entriesBytes); err != nil {
+					log.Warn("send entries", map[string]any{"error": err.Error()})
+					return
+				}
+				batch = batch[:0]
+				batchSize = 0
+			}
+			batch = append(batch, e)
+			batchSize += entrySize
 		}
-		if err := writeMsg(s, MsgTypeEntries, entriesBytes); err != nil {
-			log.Warn("send entries", map[string]any{"error": err.Error()})
-			return
+		// Send remaining
+		if len(batch) > 0 {
+			entriesMsg := EntriesMsg{Entries: batch}
+			entriesBytes, err := moltcbor.Marshal(entriesMsg)
+			if err != nil {
+				log.Error("marshal entries", map[string]any{"error": err.Error()})
+				return
+			}
+			if err := writeMsg(s, MsgTypeEntries, entriesBytes); err != nil {
+				log.Warn("send entries", map[string]any{"error": err.Error()})
+				return
+			}
 		}
 	}
 
-	// Step 5: Receive what we need
-	msgType, payload, err = readMsg(s)
-	if err != nil {
+	// Signal end of our entries
+	if err := writeMsg(s, MsgTypeDone, nil); err != nil {
+		log.Warn("send done", map[string]any{"error": err.Error()})
 		return
 	}
-	if msgType == MsgTypeEntries {
-		var incoming EntriesMsg
-		if err := moltcbor.Unmarshal(payload, &incoming); err != nil {
-			log.Warn("decode entries", map[string]any{"error": err.Error()})
+
+	// Step 5: Receive what we need (loop for chunked entries)
+	for {
+		msgType, payload, err = readMsg(s)
+		if err != nil {
 			return
 		}
-		StoreEntries(logDB, incoming.Entries, validator, log)
+		if msgType == MsgTypeDone {
+			break
+		}
+		if msgType == MsgTypeEntries {
+			var incoming EntriesMsg
+			if err := moltcbor.Unmarshal(payload, &incoming); err != nil {
+				log.Warn("decode entries", map[string]any{"error": err.Error()})
+				break
+			}
+			StoreEntries(logDB, incoming.Entries, validator, log)
+		}
 	}
-
-	writeMsg(s, MsgTypeDone, nil)
 }
 
 // InitiateSync starts a sync with a remote peer.
 func InitiateSync(s network.Stream, logDB *store.LogDB, psk []byte, validator AgentValidator, log *logging.Logger) error {
 	defer s.Close()
 	// Bound all reads/writes so a stalled peer can't hang the sync loop forever.
-	s.SetDeadline(time.Now().Add(30 * time.Second))
+	s.SetDeadline(time.Now().Add(60 * time.Second))
 
 	// Step 1: PSK authentication
 	if err := authenticateOutgoing(s, psk); err != nil {
@@ -305,31 +347,60 @@ func InitiateSync(s network.Stream, logDB *store.LogDB, psk []byte, validator Ag
 	// Fast path: nothing to exchange
 	if !theyNeed && !weNeed {
 		writeMsg(s, MsgTypeDone, nil)
-		return nil
+		return ErrNoNewEntries
 	}
 
-	// Step 5: Receive entries they're sending us
-	msgType, payload, err = readMsg(s)
-	if err != nil {
-		return fmt.Errorf("read entries: %w", err)
-	}
-	if msgType == MsgTypeEntries {
-		var incoming EntriesMsg
-		if err := moltcbor.Unmarshal(payload, &incoming); err != nil {
-			return fmt.Errorf("decode entries: %w", err)
+	// Step 5: Receive entries they're sending us (loop for chunked entries)
+	for {
+		msgType, payload, err = readMsg(s)
+		if err != nil {
+			return fmt.Errorf("read entries: %w", err)
 		}
-		StoreEntries(logDB, incoming.Entries, validator, log)
+		if msgType == MsgTypeDone {
+			break
+		}
+		if msgType == MsgTypeEntries {
+			var incoming EntriesMsg
+			if err := moltcbor.Unmarshal(payload, &incoming); err != nil {
+				return fmt.Errorf("decode entries: %w", err)
+			}
+			StoreEntries(logDB, incoming.Entries, validator, log)
+		}
 	}
 
 	// Step 6: Send entries they need
 	if theyNeed {
-		entriesMsg := EntriesMsg{Entries: toSend}
-		entriesBytes, err := moltcbor.Marshal(entriesMsg)
-		if err != nil {
-			return fmt.Errorf("marshal entries: %w", err)
+		// Send entries in chunks to stay under the 4MB message limit
+		const maxBatchBytes = 3 * 1024 * 1024 // 3MB to leave headroom
+		var batch []RawSyncEntry
+		batchSize := 0
+		for _, e := range toSend {
+			entrySize := len(e.RawCBOR) + len(e.Hash) + len(e.AuthorKey) + len(e.Signature) + 100 // overhead
+			if batchSize+entrySize > maxBatchBytes && len(batch) > 0 {
+				entriesMsg := EntriesMsg{Entries: batch}
+				entriesBytes, err := moltcbor.Marshal(entriesMsg)
+				if err != nil {
+					return fmt.Errorf("marshal entries: %w", err)
+				}
+				if err := writeMsg(s, MsgTypeEntries, entriesBytes); err != nil {
+					return fmt.Errorf("send entries: %w", err)
+				}
+				batch = batch[:0]
+				batchSize = 0
+			}
+			batch = append(batch, e)
+			batchSize += entrySize
 		}
-		if err := writeMsg(s, MsgTypeEntries, entriesBytes); err != nil {
-			return fmt.Errorf("send entries: %w", err)
+		// Send remaining
+		if len(batch) > 0 {
+			entriesMsg := EntriesMsg{Entries: batch}
+			entriesBytes, err := moltcbor.Marshal(entriesMsg)
+			if err != nil {
+				return fmt.Errorf("marshal entries: %w", err)
+			}
+			if err := writeMsg(s, MsgTypeEntries, entriesBytes); err != nil {
+				return fmt.Errorf("send entries: %w", err)
+			}
 		}
 	}
 
@@ -506,6 +577,25 @@ func StoreEntries(logDB *store.LogDB, entries []RawSyncEntry, validator AgentVal
 				"entry_type": env.Type,
 			})
 			continue
+		}
+
+		// Tombstone authority check: MessageDelete entries must be authored by
+		// the same agent that authored the original message. Without this, any
+		// agent can delete any other agent's messages.
+		if env.Type == moltcbor.EntryTypeMessageDelete {
+			var del moltcbor.MessageDelete
+			if err := moltcbor.Unmarshal(env.Payload, &del); err == nil {
+				original, err := logDB.GetEntry(del.MessageHash)
+				if err == nil && original != nil && !crypto.ConstantTimeEqual(e.AuthorKey, original.AuthorKey) {
+					log.Warn("rejecting unauthorized message delete", map[string]any{
+						"delete_author":  fmt.Sprintf("%x", e.AuthorKey[:8]),
+						"message_author": fmt.Sprintf("%x", original.AuthorKey[:8]),
+					})
+					continue
+				}
+				// If original not found, allow storage — it may arrive later
+				// and the authority check will be enforced at read time.
+			}
 		}
 
 		// Store

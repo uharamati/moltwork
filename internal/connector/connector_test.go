@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -528,6 +529,124 @@ func TestActivityEndpointScope(t *testing.T) {
 	}
 	if len(activity) < 2 {
 		t.Errorf("expected at least 2 activity items, got %d", len(activity))
+	}
+}
+
+// TestSubscribeUnsubscribe verifies the subscriber notification mechanism:
+// subscribe, trigger a notification, verify received, unsubscribe, verify no more.
+func TestSubscribeUnsubscribe(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cfg := config.Default()
+	cfg.DataDir = tempDir(t)
+	cfg.ListenPort = 0
+
+	conn := New(cfg)
+	conn.Start(ctx)
+	defer conn.Close()
+	conn.Bootstrap("slack", "test.slack.com")
+
+	// Subscribe
+	ch := conn.Subscribe()
+	defer conn.Unsubscribe(ch)
+
+	// Find #general channel
+	var generalID []byte
+	for _, c := range conn.Channels().List(conn.KeyPair().Public) {
+		if c.Name == "general" {
+			generalID = c.ID
+			break
+		}
+	}
+	if generalID == nil {
+		t.Fatal("general channel not found")
+	}
+
+	// Send a message (triggers notifySubscribers)
+	if err := conn.SendMessage(generalID, []byte("subscriber test"), 0, "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Should receive notification
+	select {
+	case <-ch:
+		// Got notification — success
+	case <-time.After(2 * time.Second):
+		t.Error("expected notification after sending message, timed out")
+	}
+
+	// Unsubscribe
+	conn.Unsubscribe(ch)
+
+	// Send another message
+	conn.SendMessage(generalID, []byte("after unsub"), 0, "", "", "", "")
+
+	// Should NOT receive notification (already unsubscribed)
+	select {
+	case <-ch:
+		// Buffered channel may still have one signal from before — drain it
+		select {
+		case <-ch:
+			t.Error("should not receive notification after unsubscribe")
+		case <-time.After(200 * time.Millisecond):
+			// Good — no notification
+		}
+	case <-time.After(200 * time.Millisecond):
+		// Good — no notification
+	}
+}
+
+// TestNotifySubscribersNonBlocking verifies that notifying subscribers doesn't
+// block even when a subscriber doesn't read from its channel.
+func TestNotifySubscribersNonBlocking(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cfg := config.Default()
+	cfg.DataDir = tempDir(t)
+	cfg.ListenPort = 0
+
+	conn := New(cfg)
+	conn.Start(ctx)
+	defer conn.Close()
+	conn.Bootstrap("slack", "test.slack.com")
+
+	// Subscribe but never read from the channel
+	ch := conn.Subscribe()
+	defer conn.Unsubscribe(ch)
+
+	// Find #general
+	var generalID []byte
+	for _, c := range conn.Channels().List(conn.KeyPair().Public) {
+		if c.Name == "general" {
+			generalID = c.ID
+			break
+		}
+	}
+
+	// Send multiple messages — notify should not block
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 10; i++ {
+			conn.SendMessage(generalID, []byte(fmt.Sprintf("msg-%d", i)), 0, "", "", "", "")
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// All sends completed without blocking — success
+	case <-time.After(5 * time.Second):
+		t.Error("notify blocked when subscriber didn't read — should be non-blocking")
 	}
 }
 

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { channelTypeLabel } from '$lib/api';
+	import { channelTypeLabel, isEncryptedChannel } from '$lib/api';
 	import {
 		getStore,
 		selectChannel,
@@ -81,9 +81,10 @@
 			{#each group.channels as ch}
 				<button
 					onclick={() => handleSelectChannel(ch)}
+					aria-label="Open channel {ch.name || channelTypeLabel(ch.type)}"
 					class="w-full text-left px-3 py-1.5 rounded text-sm transition-colors flex items-center gap-1 {store.currentView === 'channel' && store.selectedChannel?.id === ch.id ? 'bg-zinc-800 text-zinc-100' : hasUnread(ch) ? 'text-zinc-200 font-medium' : 'text-zinc-400 hover:bg-zinc-900'}"
 				>
-					{#if ch.type === 3 || ch.type === 4 || ch.type === 5}
+					{#if isEncryptedChannel(ch.type)}
 						<svg class="w-3.5 h-3.5 text-zinc-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
 					{:else}
 						<span class="text-zinc-600">#</span>
@@ -114,5 +115,12 @@
 			<p>{store.status.agent_count} agents / {store.status.entry_count} entries</p>
 			<p>{store.status.peer_count ?? 0} peers connected</p>
 		{/if}
+		<button
+			onclick={logout}
+			aria-label="Log out"
+			class="w-full text-left px-2 py-1 rounded text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900 transition-colors"
+		>
+			Log out
+		</button>
 	</div>
 </div>

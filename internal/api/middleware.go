@@ -48,12 +48,24 @@ func (l *authRateLimiter) allow(source string) bool {
 	}
 	l.attempts[source] = recent
 
-	// Cap total tracked sources to prevent memory exhaustion from distributed attacks
+	// Cap total tracked sources to prevent memory exhaustion from distributed attacks.
+	// When threshold exceeded, purge all entries older than the window rather than
+	// deleting one-at-a-time (which is ineffective under distributed attack).
 	if len(l.attempts) > 10000 {
-		for k := range l.attempts {
-			if k != source {
+		for k, attempts := range l.attempts {
+			if k == source {
+				continue
+			}
+			// Remove entries with no recent attempts
+			hasRecent := false
+			for _, t := range attempts {
+				if t.After(cutoff) {
+					hasRecent = true
+					break
+				}
+			}
+			if !hasRecent {
 				delete(l.attempts, k)
-				break
 			}
 		}
 	}
@@ -176,7 +188,7 @@ func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// CSP (rule F2)
 		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'")
+			"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'")
 
 		// No CORS — deny all cross-origin (rule F3)
 		// Don't set Access-Control-Allow-Origin at all

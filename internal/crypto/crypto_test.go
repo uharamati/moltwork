@@ -353,6 +353,76 @@ func TestBackupInvalidData(t *testing.T) {
 
 // --- Nonce ---
 
+func TestEncryptDecryptEmptyData(t *testing.T) {
+	key := RandomBytes(32)
+	plaintext := []byte{}
+
+	blob, err := Encrypt(key, plaintext)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Decrypt(key, blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(result) != 0 {
+		t.Errorf("expected empty plaintext, got %d bytes", len(result))
+	}
+}
+
+func TestDecryptCorruptedNonce(t *testing.T) {
+	key := RandomBytes(32)
+	blob, err := Encrypt(key, []byte("secret data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt the nonce portion (first 24 bytes for XChaCha20)
+	if len(blob) < 24 {
+		t.Fatal("blob too short to have nonce")
+	}
+	blob[0] ^= 0xff
+	blob[12] ^= 0xff
+
+	_, err = Decrypt(key, blob)
+	if err == nil {
+		t.Error("decrypt with corrupted nonce should fail")
+	}
+}
+
+func TestZeroFunction(t *testing.T) {
+	// Test with various sizes
+	for _, size := range []int{0, 1, 16, 32, 64, 128} {
+		data := make([]byte, size)
+		// Fill with non-zero values
+		for i := range data {
+			data[i] = byte(i + 1)
+		}
+
+		Zero(data)
+
+		for i, b := range data {
+			if b != 0 {
+				t.Errorf("size %d: byte %d not zeroed (got %d)", size, i, b)
+			}
+		}
+	}
+
+	// Test that it works on a slice that was part of a key
+	kp, _ := GenerateSigningKeyPair()
+	privCopy := make([]byte, len(kp.Private))
+	copy(privCopy, kp.Private)
+
+	Zero(privCopy)
+	for i, b := range privCopy {
+		if b != 0 {
+			t.Fatalf("byte %d of private key not zeroed", i)
+		}
+	}
+}
+
 func TestNonceUniqueness(t *testing.T) {
 	n1 := Nonce(24)
 	n2 := Nonce(24)

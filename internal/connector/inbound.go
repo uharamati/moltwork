@@ -3,6 +3,8 @@ package connector
 import (
 	"encoding/hex"
 	"fmt"
+	"sort"
+	"time"
 
 	moltcbor "moltwork/internal/cbor"
 	"moltwork/internal/channel"
@@ -22,11 +24,28 @@ type DecodedMessage struct {
 	Timestamp   int64  `json:"timestamp"`
 	IsThread    bool   `json:"is_thread"`
 	ParentHash  string `json:"parent_hash,omitempty"`
-	ActivityType string `json:"activity_type,omitempty"` // "message", "thread", "channel_create", "channel_join", "channel_leave", "channel_archive", "channel_unarchive", "member_invite", "member_remove", "revocation", "org_relationship"
+	ReplyCount   int                `json:"reply_count"`
+	Reactions    map[string][]string `json:"reactions,omitempty"`    // emoji -> [author_key_hex]
+	Pinned       bool               `json:"pinned,omitempty"`
+	Edited       bool               `json:"edited,omitempty"`
+	ActivityType string              `json:"activity_type,omitempty"` // "message", "thread", "channel_create", "channel_join", "channel_leave", "channel_archive", "channel_unarchive", "member_invite", "member_remove", "revocation", "org_relationship"
 }
 
 // deletedMessageHashes returns a set of message hashes that have been soft-deleted.
+// Only honors deletions where the delete entry's author matches the original
+// message's author (tombstone authority check — prevents agents from deleting
+// each other's messages).
+//
+// Results are cached for 5 seconds to avoid rescanning the log on every request.
 func (c *Connector) deletedMessageHashes() map[string]bool {
+	c.deletedHashCacheMu.RLock()
+	if c.deletedHashCache != nil && time.Since(c.deletedHashCacheTime) < 5*time.Second {
+		cache := c.deletedHashCache
+		c.deletedHashCacheMu.RUnlock()
+		return cache
+	}
+	c.deletedHashCacheMu.RUnlock()
+
 	deleted := make(map[string]bool)
 	entries, err := c.logDB.EntriesByType(int(moltcbor.EntryTypeMessageDelete))
 	if err != nil {
@@ -41,9 +60,272 @@ func (c *Connector) deletedMessageHashes() map[string]bool {
 		if err := moltcbor.Unmarshal(payload, &del); err != nil {
 			continue
 		}
-		deleted[fmt.Sprintf("%x", del.MessageHash)] = true
+
+		// Verify the delete entry's author is the same as the original message's author.
+		// Without this check, any agent could tombstone any other agent's messages.
+		msgHashHex := fmt.Sprintf("%x", del.MessageHash)
+		original, err := c.logDB.GetEntry(del.MessageHash)
+		if err != nil || original == nil {
+			// Original message not found — may not have synced yet. Skip.
+			continue
+		}
+		if !crypto.ConstantTimeEqual(raw.AuthorKey, original.AuthorKey) {
+			c.log.Warn("ignoring unauthorized message delete", map[string]any{
+				"delete_author":  fmt.Sprintf("%x", raw.AuthorKey[:8]),
+				"message_author": fmt.Sprintf("%x", original.AuthorKey[:8]),
+				"message_hash":   msgHashHex,
+			})
+			continue
+		}
+
+		deleted[msgHashHex] = true
 	}
+
+	c.deletedHashCacheMu.Lock()
+	c.deletedHashCache = deleted
+	c.deletedHashCacheTime = time.Now()
+	c.deletedHashCacheMu.Unlock()
+
 	return deleted
+}
+
+// invalidateDeletedCache clears the deleted message hash cache.
+func (c *Connector) invalidateDeletedCache() {
+	c.deletedHashCacheMu.Lock()
+	c.deletedHashCache = nil
+	c.deletedHashCacheMu.Unlock()
+}
+
+// editedMessages returns a map of message_hash_hex -> latest content for edited messages.
+// Only honors edits from the original author.
+// Results are cached for 5 seconds.
+func (c *Connector) editedMessages() map[string]string {
+	c.editedMsgCacheMu.RLock()
+	if c.editedMsgCache != nil && time.Since(c.editedMsgCacheTime) < 5*time.Second {
+		cache := c.editedMsgCache
+		c.editedMsgCacheMu.RUnlock()
+		return cache
+	}
+	c.editedMsgCacheMu.RUnlock()
+
+	edited := make(map[string]string)
+	entries, err := c.logDB.EntriesByType(int(moltcbor.EntryTypeMessageEdit))
+	if err != nil {
+		return edited
+	}
+
+	// Process edits in order — later edits override earlier ones
+	for _, raw := range entries {
+		payload := decodePayload(raw)
+		if payload == nil {
+			continue
+		}
+		var edit moltcbor.MessageEdit
+		if err := moltcbor.Unmarshal(payload, &edit); err != nil {
+			continue
+		}
+
+		msgHashHex := fmt.Sprintf("%x", edit.MessageHash)
+		original, err := c.logDB.GetEntry(edit.MessageHash)
+		if err != nil || original == nil {
+			continue
+		}
+		if !crypto.ConstantTimeEqual(raw.AuthorKey, original.AuthorKey) {
+			c.log.Warn("ignoring unauthorized message edit", map[string]any{
+				"edit_author":    fmt.Sprintf("%x", raw.AuthorKey[:8]),
+				"message_author": fmt.Sprintf("%x", original.AuthorKey[:8]),
+				"message_hash":   msgHashHex,
+			})
+			continue
+		}
+
+		edited[msgHashHex] = string(edit.NewContent)
+	}
+
+	c.editedMsgCacheMu.Lock()
+	c.editedMsgCache = edited
+	c.editedMsgCacheTime = time.Now()
+	c.editedMsgCacheMu.Unlock()
+
+	return edited
+}
+
+// invalidateEditedCache clears the edited message cache.
+func (c *Connector) invalidateEditedCache() {
+	c.editedMsgCacheMu.Lock()
+	c.editedMsgCache = nil
+	c.editedMsgCacheMu.Unlock()
+}
+
+// messageReactions returns a map of message_hash_hex -> emoji -> [author_key_hex].
+// Applies removals so only active reactions are returned.
+// Results are cached for 5 seconds.
+func (c *Connector) messageReactions() map[string]map[string][]string {
+	c.reactionCacheMu.RLock()
+	if c.reactionCache != nil && time.Since(c.reactionCacheTime) < 5*time.Second {
+		cache := c.reactionCache
+		c.reactionCacheMu.RUnlock()
+		return cache
+	}
+	c.reactionCacheMu.RUnlock()
+
+	// Intermediate structure: message_hash -> emoji -> author_key -> bool (true=active, false=removed)
+	state := make(map[string]map[string]map[string]bool)
+
+	entries, err := c.logDB.EntriesByType(int(moltcbor.EntryTypeReaction))
+	if err != nil {
+		return make(map[string]map[string][]string)
+	}
+
+	for _, raw := range entries {
+		payload := decodePayload(raw)
+		if payload == nil {
+			continue
+		}
+		var react moltcbor.Reaction
+		if err := moltcbor.Unmarshal(payload, &react); err != nil {
+			continue
+		}
+
+		msgHashHex := fmt.Sprintf("%x", react.MessageHash)
+		authorHex := fmt.Sprintf("%x", raw.AuthorKey)
+
+		if state[msgHashHex] == nil {
+			state[msgHashHex] = make(map[string]map[string]bool)
+		}
+		if state[msgHashHex][react.Emoji] == nil {
+			state[msgHashHex][react.Emoji] = make(map[string]bool)
+		}
+
+		if react.Remove {
+			state[msgHashHex][react.Emoji][authorHex] = false
+		} else {
+			state[msgHashHex][react.Emoji][authorHex] = true
+		}
+	}
+
+	// Collapse into final form
+	reactions := make(map[string]map[string][]string)
+	for msgHash, emojis := range state {
+		for emoji, authors := range emojis {
+			var active []string
+			for author, isActive := range authors {
+				if isActive {
+					active = append(active, author)
+				}
+			}
+			if len(active) > 0 {
+				if reactions[msgHash] == nil {
+					reactions[msgHash] = make(map[string][]string)
+				}
+				reactions[msgHash][emoji] = active
+			}
+		}
+	}
+
+	c.reactionCacheMu.Lock()
+	c.reactionCache = reactions
+	c.reactionCacheTime = time.Now()
+	c.reactionCacheMu.Unlock()
+
+	return reactions
+}
+
+// invalidateReactionCache clears the reaction cache.
+func (c *Connector) invalidateReactionCache() {
+	c.reactionCacheMu.Lock()
+	c.reactionCache = nil
+	c.reactionCacheMu.Unlock()
+}
+
+// channelPins returns a map of channel_id_hex -> set of pinned message_hash_hex.
+// Applies unpins so only currently pinned messages are returned.
+// Results are cached for 5 seconds.
+func (c *Connector) channelPins() map[string]map[string]bool {
+	c.pinCacheMu.RLock()
+	if c.pinCache != nil && time.Since(c.pinCacheTime) < 5*time.Second {
+		cache := c.pinCache
+		c.pinCacheMu.RUnlock()
+		return cache
+	}
+	c.pinCacheMu.RUnlock()
+
+	pins := make(map[string]map[string]bool)
+
+	// Process pins
+	pinEntries, err := c.logDB.EntriesByType(int(moltcbor.EntryTypeChannelPin))
+	if err == nil {
+		for _, raw := range pinEntries {
+			payload := decodePayload(raw)
+			if payload == nil {
+				continue
+			}
+			var pin moltcbor.ChannelPin
+			if err := moltcbor.Unmarshal(payload, &pin); err != nil {
+				continue
+			}
+			chHex := fmt.Sprintf("%x", pin.ChannelID)
+			msgHex := fmt.Sprintf("%x", pin.MessageHash)
+			if pins[chHex] == nil {
+				pins[chHex] = make(map[string]bool)
+			}
+			pins[chHex][msgHex] = true
+		}
+	}
+
+	// Process unpins
+	unpinEntries, err := c.logDB.EntriesByType(int(moltcbor.EntryTypeChannelUnpin))
+	if err == nil {
+		for _, raw := range unpinEntries {
+			payload := decodePayload(raw)
+			if payload == nil {
+				continue
+			}
+			var pin moltcbor.ChannelPin
+			if err := moltcbor.Unmarshal(payload, &pin); err != nil {
+				continue
+			}
+			chHex := fmt.Sprintf("%x", pin.ChannelID)
+			msgHex := fmt.Sprintf("%x", pin.MessageHash)
+			if pins[chHex] != nil {
+				delete(pins[chHex], msgHex)
+			}
+		}
+	}
+
+	c.pinCacheMu.Lock()
+	c.pinCache = pins
+	c.pinCacheTime = time.Now()
+	c.pinCacheMu.Unlock()
+
+	return pins
+}
+
+// invalidatePinCache clears the pin cache.
+func (c *Connector) invalidatePinCache() {
+	c.pinCacheMu.Lock()
+	c.pinCache = nil
+	c.pinCacheMu.Unlock()
+}
+
+// GetChannelPins returns the set of pinned message hashes for a channel.
+func (c *Connector) GetChannelPins(channelIDHex string) []string {
+	allPins := c.channelPins()
+	pinSet := allPins[channelIDHex]
+	var result []string
+	for hash := range pinSet {
+		result = append(result, hash)
+	}
+	return result
+}
+
+// GetMessageReactions returns reactions for a specific message.
+func (c *Connector) GetMessageReactions(messageHashHex string) map[string][]string {
+	allReactions := c.messageReactions()
+	if r, ok := allReactions[messageHashHex]; ok {
+		return r
+	}
+	return make(map[string][]string)
 }
 
 // GetMessages returns decoded messages for a channel since a given timestamp.
@@ -64,6 +346,13 @@ func (c *Connector) GetMessages(channelIDHex string, since int64, limit int) ([]
 
 	// Collect deleted message hashes for filtering
 	deleted := c.deletedMessageHashes()
+	// Collect edited messages for content replacement
+	edited := c.editedMessages()
+	// Collect reactions for decoration
+	reactions := c.messageReactions()
+	// Collect pins for this channel
+	allPins := c.channelPins()
+	channelPins := allPins[channelIDHex]
 
 	// Get message entries from the log
 	entries, err := c.logDB.EntriesByTypeInRange(int(moltcbor.EntryTypeMessage), since, limit)
@@ -101,6 +390,43 @@ func (c *Connector) GetMessages(channelIDHex string, since int64, limit int) ([]
 		}
 	}
 
+	// Sort the concatenated results by timestamp so messages from different
+	// entry types (plain, thread, sealed) are properly interleaved.
+	sort.Slice(messages, func(i, j int) bool {
+		return messages[i].Timestamp < messages[j].Timestamp
+	})
+
+	// Populate reply counts: build a map of parent_hash -> count from thread messages,
+	// then stamp each non-thread message with its reply count.
+	replyCounts := make(map[string]int)
+	for i := range messages {
+		if messages[i].IsThread && messages[i].ParentHash != "" {
+			replyCounts[messages[i].ParentHash]++
+		}
+	}
+	for i := range messages {
+		if !messages[i].IsThread {
+			messages[i].ReplyCount = replyCounts[messages[i].Hash]
+		}
+	}
+
+	// Apply edits, reactions, and pins to messages
+	for i := range messages {
+		// Apply edits
+		if newContent, ok := edited[messages[i].Hash]; ok {
+			messages[i].Content = newContent
+			messages[i].Edited = true
+		}
+		// Apply reactions
+		if r, ok := reactions[messages[i].Hash]; ok {
+			messages[i].Reactions = r
+		}
+		// Apply pin status
+		if channelPins[messages[i].Hash] {
+			messages[i].Pinned = true
+		}
+	}
+
 	return messages, nil
 }
 
@@ -113,6 +439,12 @@ func (c *Connector) GetNewActivity(since int64, limit int) ([]DecodedMessage, er
 
 	// Collect deleted message hashes for filtering
 	deleted := c.deletedMessageHashes()
+	// Collect edited messages for content replacement
+	edited := c.editedMessages()
+	// Collect reactions for decoration
+	reactions := c.messageReactions()
+	// Collect all pins
+	allPins := c.channelPins()
 
 	// Fetch all entries since timestamp (any type)
 	allEntries, err := c.logDB.EntriesSince(since, limit)
@@ -127,6 +459,22 @@ func (c *Connector) GetNewActivity(since int64, limit int) ([]DecodedMessage, er
 			messages = append(messages, *decoded)
 		}
 	}
+
+	// Apply edits, reactions, and pins to messages
+	for i := range messages {
+		if newContent, ok := edited[messages[i].Hash]; ok {
+			messages[i].Content = newContent
+			messages[i].Edited = true
+		}
+		if r, ok := reactions[messages[i].Hash]; ok {
+			messages[i].Reactions = r
+		}
+		channelPins := allPins[messages[i].ChannelID]
+		if channelPins[messages[i].Hash] {
+			messages[i].Pinned = true
+		}
+	}
+
 	return messages, nil
 }
 
@@ -180,7 +528,24 @@ func (c *Connector) decodeActivityEntry(raw *store.RawEntry) *DecodedMessage {
 		return c.decodeOrgRelationshipEntry(raw)
 
 	default:
-		// Skip internal entries (key exchange, PSK distribution, attestation, etc.)
+		// Known internal entry types are silently skipped
+		switch entryType {
+		case moltcbor.EntryTypePairwiseKeyExchange, moltcbor.EntryTypeGroupKeyDistribute,
+			moltcbor.EntryTypeKeyRotationPending, moltcbor.EntryTypeKeyRotationActive,
+			moltcbor.EntryTypeAttestation, moltcbor.EntryTypePSKDistribution,
+			moltcbor.EntryTypeCapabilityDecl, moltcbor.EntryTypeAgentRegistration,
+			moltcbor.EntryTypeTrustBoundary, moltcbor.EntryTypeAdminPromote,
+			moltcbor.EntryTypeAdminDemote, moltcbor.EntryTypeTokenStatus,
+			moltcbor.EntryTypeMessageDelete, moltcbor.EntryTypeMessageEdit,
+			moltcbor.EntryTypeReaction, moltcbor.EntryTypeChannelPin,
+			moltcbor.EntryTypeChannelUnpin:
+			// Known internal types — skip silently
+		default:
+			c.log.Warn("unknown entry type in activity feed", map[string]any{
+				"entry_type": int(entryType),
+				"hash":       hex.EncodeToString(raw.Hash),
+			})
+		}
 		return nil
 	}
 }

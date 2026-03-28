@@ -189,17 +189,17 @@ func (c *Connector) syncPull(client *http.Client, syncURL string, token string) 
 		}
 		rawCBOR, err := base64.StdEncoding.DecodeString(e.RawCBOR)
 		if err != nil {
-			c.log.Warn("HTTP sync: invalid raw_cbor, skipping")
+			c.log.Warn("HTTP sync: invalid raw_cbor, skipping", map[string]any{"hash": e.Hash, "error": err.Error()})
 			continue
 		}
 		authorKey, err := hex.DecodeString(e.AuthorKey)
 		if err != nil {
-			c.log.Warn("HTTP sync: invalid author_key, skipping")
+			c.log.Warn("HTTP sync: invalid author_key, skipping", map[string]any{"hash": e.Hash, "error": err.Error()})
 			continue
 		}
 		signature, err := base64.StdEncoding.DecodeString(e.Signature)
 		if err != nil {
-			c.log.Warn("HTTP sync: invalid signature, skipping")
+			c.log.Warn("HTTP sync: invalid signature, skipping", map[string]any{"hash": e.Hash, "error": err.Error()})
 			continue
 		}
 

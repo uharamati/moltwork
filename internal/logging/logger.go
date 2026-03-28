@@ -85,6 +85,10 @@ func (l *Logger) log(level Level, msg string, fields map[string]any) {
 
 	data, err := json.Marshal(entry)
 	if err != nil {
+		// Plaintext fallback when JSON marshalling fails
+		l.mu.Lock()
+		l.out.Write([]byte(entry.Timestamp + " " + string(entry.Level) + " [" + entry.Component + "] " + entry.Message + "\n"))
+		l.mu.Unlock()
 		return
 	}
 
@@ -116,6 +120,10 @@ func (l *Logger) LogTiered(level Level, tier int, humanMsg string, msg string, f
 
 	data, err := json.Marshal(entry)
 	if err != nil {
+		// Plaintext fallback when JSON marshalling fails
+		l.mu.Lock()
+		l.out.Write([]byte(entry.Timestamp + " " + string(entry.Level) + " [" + entry.Component + "] " + entry.Message + "\n"))
+		l.mu.Unlock()
 		return
 	}
 

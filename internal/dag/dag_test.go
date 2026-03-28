@@ -269,6 +269,60 @@ func TestDAGNoConcurrentForkFalsePositive(t *testing.T) {
 	}
 }
 
+// TestForkDetection creates two entries with the same parents from the same author
+// and verifies the DAG detects this as a fork via DetectForks.
+func TestForkDetection(t *testing.T) {
+	kp, _ := crypto.GenerateSigningKeyPair()
+	d := New()
+
+	// Root entry
+	root := makeEntry(t, kp, nil, "root")
+	if err := d.Insert(root); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two entries from same author, same parent — this is a fork
+	forkA := makeEntry(t, kp, [][32]byte{root.Hash}, "fork-A")
+	forkB := makeEntry(t, kp, [][32]byte{root.Hash}, "fork-B")
+	if err := d.Insert(forkA); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Insert(forkB); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both entries should be stored
+	if d.Len() != 3 {
+		t.Fatalf("expected 3 entries, got %d", d.Len())
+	}
+	if !d.Has(forkA.Hash) {
+		t.Error("forkA should be in the DAG")
+	}
+	if !d.Has(forkB.Hash) {
+		t.Error("forkB should be in the DAG")
+	}
+
+	// DetectForks should find exactly one fork
+	forks := d.DetectForks()
+	if len(forks) != 1 {
+		t.Fatalf("expected 1 fork, got %d", len(forks))
+	}
+
+	f := forks[0]
+	if f.Parent != root.Hash {
+		t.Error("fork parent should be root hash")
+	}
+
+	// The two entries should be referenced (order may vary)
+	entries := map[[32]byte]bool{f.EntryA: true, f.EntryB: true}
+	if !entries[forkA.Hash] || !entries[forkB.Hash] {
+		t.Error("fork should reference both forked entries")
+	}
+	if f.EntryA == f.EntryB {
+		t.Error("fork entries must be different")
+	}
+}
+
 func TestDAGInsertBatch(t *testing.T) {
 	kp, _ := crypto.GenerateSigningKeyPair()
 	d := New()

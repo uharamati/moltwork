@@ -53,7 +53,7 @@ func SealToPublicKey(recipientPub [32]byte, plaintext []byte) ([]byte, error) {
 //
 // Input format: ephemeral_public_key (32 bytes) || nonce (24 bytes) || ciphertext
 func OpenFromPublicKey(recipientPriv [32]byte, sealed []byte) ([]byte, error) {
-	if len(sealed) < 32+24+1 { // pubkey + minimum nonce + at least 1 byte
+	if len(sealed) < 32+24+16 { // pubkey + nonce + Poly1305 tag minimum
 		return nil, ErrDecryptionFailed
 	}
 

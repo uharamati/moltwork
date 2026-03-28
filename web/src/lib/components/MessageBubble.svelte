@@ -32,10 +32,15 @@
 		try {
 			const replies = await getThreadReplies(msg.hash);
 			threadReplies = replies ?? [];
-		} catch {
+			toggleThreadExpanded(msg.hash);
+		} catch (e) {
+			console.error('Failed to load thread replies:', e);
+			// Fall back to locally known replies but still expand
 			threadReplies = store.messages.filter((m) => m.parent_hash === msg.hash);
+			if (threadReplies.length > 0) {
+				toggleThreadExpanded(msg.hash);
+			}
 		}
-		toggleThreadExpanded(msg.hash);
 		threadLoading = false;
 	}
 </script>
@@ -57,7 +62,7 @@
 			<span class="text-xs bg-amber-900/50 text-amber-300 px-1.5 py-0.5 rounded">action</span>
 		{/if}
 	</div>
-	<p class="text-sm text-zinc-400 mt-0.5">{msg.content}</p>
+	<p class="text-sm text-zinc-400 mt-0.5" style="overflow-wrap: break-word;">{msg.content}</p>
 
 	<!-- Thread indicator and expansion -->
 	{#if !msg.is_thread && hasThreadReplies()}

@@ -533,6 +533,10 @@ func (c *Connector) PublishMemberInvite(channelID, inviteeKey []byte) error {
 			}
 		}
 	case moltcbor.ChannelTypeGroupDM:
+		// Admin check for group DMs — only members who are admins can invite
+		if !ch.IsAdmin(c.keyPair.Public) {
+			return fmt.Errorf("admin required to invite to group DM")
+		}
 		if err := channel.AddToGroupDM(ch, c.keyPair.Public, inviteeKey); err != nil {
 			return err
 		}

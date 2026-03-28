@@ -2,8 +2,10 @@ package store
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -159,6 +161,125 @@ func TestLogDBDuplicateInsertIgnored(t *testing.T) {
 	count, _ := db.EntryCount()
 	if count != 1 {
 		t.Errorf("expected 1 entry after duplicate insert, got %d", count)
+	}
+}
+
+// --- Concurrent LogDB Tests ---
+
+func TestLogDBConcurrentInsert(t *testing.T) {
+	// Tests that a single writer can insert while multiple readers query
+	// concurrently without errors. This mirrors the real architecture:
+	// gossip sync writes entries while API handlers read.
+	dir := tempDir(t)
+	db, err := OpenLogDB(filepath.Join(dir, "log.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	const totalEntries = 200
+
+	// Single writer goroutine
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < totalEntries; i++ {
+			hash := []byte(fmt.Sprintf("hash-%d", i))
+			raw := []byte(fmt.Sprintf("data-%d", i))
+			author := []byte("author")
+			sig := []byte("sig")
+			if err := db.InsertEntry(hash, raw, author, sig, 1, int64(i), nil); err != nil {
+				t.Errorf("insert %d failed: %v", i, err)
+			}
+		}
+	}()
+
+	// Multiple concurrent readers
+	const readers = 5
+	wg.Add(readers)
+	for r := 0; r < readers; r++ {
+		go func(rID int) {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				if _, err := db.AllHashes(); err != nil {
+					t.Errorf("reader %d, iter %d: AllHashes failed: %v", rID, i, err)
+				}
+			}
+		}(r)
+	}
+	wg.Wait()
+
+	count, err := db.EntryCount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != totalEntries {
+		t.Errorf("expected %d entries, got %d", totalEntries, count)
+	}
+}
+
+func TestLogDBConcurrentRead(t *testing.T) {
+	dir := tempDir(t)
+	db, err := OpenLogDB(filepath.Join(dir, "log.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Pre-populate some entries
+	for i := 0; i < 50; i++ {
+		hash := []byte(fmt.Sprintf("pre-hash-%d", i))
+		raw := []byte(fmt.Sprintf("pre-data-%d", i))
+		db.InsertEntry(hash, raw, []byte("author"), []byte("sig"), 1, int64(i), nil)
+	}
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Writer goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 50; i < 150; i++ {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			hash := []byte(fmt.Sprintf("write-hash-%d", i))
+			raw := []byte(fmt.Sprintf("write-data-%d", i))
+			db.InsertEntry(hash, raw, []byte("author"), []byte("sig"), 1, int64(i), nil)
+		}
+	}()
+
+	// Reader goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			// Read operations should never panic or corrupt
+			db.AllHashes()
+			db.EntryCount()
+			db.HasEntry([]byte(fmt.Sprintf("pre-hash-%d", i%50)))
+		}
+	}()
+
+	wg.Wait()
+	close(done)
+
+	// Verify DB is not corrupted: count should be at least 50 (pre-populated)
+	count, err := db.EntryCount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count < 50 {
+		t.Errorf("expected at least 50 entries, got %d", count)
 	}
 }
 

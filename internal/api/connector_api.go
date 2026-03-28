@@ -30,6 +30,10 @@ func (s *Server) registerConnectorRoutes(mux *http.ServeMux) {
 	// --- Messaging ---
 	mux.HandleFunc("POST /api/messages/send", s.handleSendMessage)
 	mux.HandleFunc("POST /api/messages/delete", s.handleDeleteMessage)
+	mux.HandleFunc("POST /api/messages/edit", s.handleEditMessage)
+	mux.HandleFunc("POST /api/messages/react", s.handleReactMessage)
+	mux.HandleFunc("POST /api/messages/unreact", s.handleUnreactMessage)
+	mux.HandleFunc("GET /api/messages/{hash}/reactions", s.handleGetReactions)
 	mux.HandleFunc("POST /api/dm/send", s.handleSendDM)
 	mux.HandleFunc("GET /api/messages/{channel_id}", s.handleGetMessages)
 	mux.HandleFunc("GET /api/activity", s.handleGetActivity)
@@ -40,6 +44,9 @@ func (s *Server) registerConnectorRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/threads/{parent_hash}", s.handleGetThreadReplies)
 
 	// --- Channels ---
+	mux.HandleFunc("POST /api/channels/pin", s.handlePinMessage)
+	mux.HandleFunc("POST /api/channels/unpin", s.handleUnpinMessage)
+	mux.HandleFunc("GET /api/channels/{id}/pins", s.handleGetChannelPins)
 	mux.HandleFunc("POST /api/channels/create", s.handleCreateChannel)
 	mux.HandleFunc("POST /api/channels/join", s.handleJoinChannel)
 	mux.HandleFunc("POST /api/channels/leave", s.handleLeaveChannel)
@@ -49,9 +56,13 @@ func (s *Server) registerConnectorRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/channels/remove", s.handleRemoveFromChannel)
 	mux.HandleFunc("POST /api/channels/promote", s.handlePromoteAdmin)
 	mux.HandleFunc("POST /api/channels/demote", s.handleDemoteAdmin)
+	mux.HandleFunc("POST /api/channels/update", s.handleUpdateChannel)
+	mux.HandleFunc("POST /api/channels/mark-read", s.handleMarkRead)
+	mux.HandleFunc("GET /api/channels/unread", s.handleGetUnread)
 
 	// --- Identity ---
 	mux.HandleFunc("GET /api/identity", s.handleGetIdentity)
+	mux.HandleFunc("POST /api/identity/update", s.handleUpdateIdentity)
 	mux.HandleFunc("POST /api/org/relationship", s.handleProposeRelationship)
 	mux.HandleFunc("POST /api/org/relationship/confirm", s.handleConfirmRelationship)
 
@@ -63,6 +74,12 @@ func (s *Server) registerConnectorRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/revoke/self", s.handleSelfRevoke)
 	mux.HandleFunc("POST /api/revoke/manager", s.handleManagerRevoke)
 	mux.HandleFunc("POST /api/revoke/quorum", s.handleQuorumRevoke)
+
+	// --- Quorum Revocation Ceremony ---
+	mux.HandleFunc("POST /api/revoke/quorum/propose", s.handleQuorumPropose)
+	mux.HandleFunc("GET /api/revoke/quorum/{id}", s.handleQuorumGetProposal)
+	mux.HandleFunc("POST /api/revoke/quorum/{id}/sign", s.handleQuorumSign)
+	mux.HandleFunc("GET /api/revoke/quorum/proposals", s.handleQuorumListProposals)
 }
 
 // --- Bootstrap ---
@@ -93,7 +110,14 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	// Bootstrap agent posts its own join announcement to Slack #moltwork-agents.
 	// This is the only agent whose bot is added to the channel — all future
 	// join announcements are relayed through this bot by the welcoming agent.
-	go s.conn.AnnounceOwnJoinToSlack("Bootstrap Agent", "", "")
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Warn("slack announce panicked", map[string]any{"error": fmt.Sprintf("%v", r)})
+			}
+		}()
+		s.conn.AnnounceOwnJoinToSlack("Bootstrap Agent", "", "")
+	}()
 
 	writeSuccess(w, r, map[string]any{
 		"status":    "bootstrapped",
@@ -131,6 +155,10 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 			"Invalid request body.", nil), 400)
 		return
 	}
+	req.DisplayName = sanitizeText(req.DisplayName)
+	req.Title = sanitizeText(req.Title)
+	req.Team = sanitizeText(req.Team)
+	req.HumanName = sanitizeText(req.HumanName)
 	if req.DisplayName == "" || req.Platform == "" {
 		writeError(w, r, merrors.New("onboarding.join.missing_fields", merrors.Fatal,
 			"Display name and platform are required.", nil), 400)
@@ -250,8 +278,10 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 	s.conn.EstablishPairwiseSecrets()
 
 	// Distribute PSK to the new agent
+	pskDistributed := true
 	if err := s.conn.DistributePSKTo(kp.Public); err != nil {
 		s.conn.Log().Warn("PSK distribution failed", map[string]any{"error": err.Error()})
+		pskDistributed = false
 	}
 
 	// Post introduction in #introductions
@@ -273,12 +303,20 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 	// Post join announcement to Slack #moltwork-agents (onboarding steps 13-14)
 	// The welcoming agent (this node) relays the announcement on behalf of the new agent,
 	// using its own Slack bot token which is already in the #moltwork-agents channel.
-	go s.conn.RelayJoinToSlack(req.DisplayName, req.Title, req.Team)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Warn("slack relay panicked", map[string]any{"error": fmt.Sprintf("%v", r)})
+			}
+		}()
+		s.conn.RelayJoinToSlack(req.DisplayName, req.Title, req.Team)
+	}()
 
 	writeSuccess(w, r, map[string]any{
-		"status":    "joined",
-		"agent_key": fmt.Sprintf("%x", kp.Public),
-		"channels":  len(channels),
+		"status":          "joined",
+		"agent_key":       fmt.Sprintf("%x", kp.Public),
+		"channels":        len(channels),
+		"psk_distributed": pskDistributed,
 	})
 }
 
@@ -300,11 +338,15 @@ type joinRendezvousRequest struct {
 func (s *Server) handleJoinRendezvous(w http.ResponseWriter, r *http.Request) {
 	var req joinRendezvousRequest
 	if err := readJSON(r, &req); err != nil {
-		httpError(w, "invalid request body", 400)
+		writeError(w, r, fmt.Errorf("invalid request body"), 400)
 		return
 	}
+	req.DisplayName = sanitizeText(req.DisplayName)
+	req.Title = sanitizeText(req.Title)
+	req.Team = sanitizeText(req.Team)
+	req.HumanName = sanitizeText(req.HumanName)
 	if req.Platform == "" || req.PlatformToken == "" {
-		httpError(w, "platform and platform_token are required", 400)
+		writeError(w, r, fmt.Errorf("platform and platform_token are required"), 400)
 		return
 	}
 
@@ -314,13 +356,13 @@ func (s *Server) handleJoinRendezvous(w http.ResponseWriter, r *http.Request) {
 	case "slack":
 		verifier = identity.NewSlackVerifier()
 	default:
-		httpError(w, "unsupported platform: "+req.Platform, 400)
+		writeError(w, r, fmt.Errorf("unsupported platform: %s", req.Platform), 400)
 		return
 	}
 
 	platformID, err := verifier.Verify(r.Context(), req.PlatformToken)
 	if err != nil {
-		httpError(w, "token verification failed", 401)
+		writeError(w, r, fmt.Errorf("token verification failed"), 401)
 		return
 	}
 
@@ -337,13 +379,21 @@ func (s *Server) handleJoinRendezvous(w http.ResponseWriter, r *http.Request) {
 	s.joinStatuses.Store(joinID, &joinStatusEntry{Status: "joining"})
 
 	go func() {
+		// Schedule cleanup of the join status entry after 1 hour to prevent
+		// unbounded growth of the joinStatuses sync.Map.
+		defer time.AfterFunc(1*time.Hour, func() {
+			s.joinStatuses.Delete(joinID)
+		})
+
 		// Trigger the full join flow (Slack PSK exchange + HTTP chain sync + gossip)
+		s.joinStatuses.Store(joinID, &joinStatusEntry{Status: "verifying_token"})
 		if err := s.conn.Join(context.Background(), req.Platform, platformID.WorkspaceDomain, req.PlatformToken); err != nil {
 			s.joinStatuses.Store(joinID, &joinStatusEntry{Status: "failed", Error: err.Error()})
 			return
 		}
 
 		// Register this agent in the workspace (publish registration entry)
+		s.joinStatuses.Store(joinID, &joinStatusEntry{Status: "syncing_log"})
 		kp := s.conn.KeyPair()
 		exchKey := s.conn.ExchangeKey()
 
@@ -382,6 +432,7 @@ func (s *Server) handleJoinRendezvous(w http.ResponseWriter, r *http.Request) {
 		regPayload, _ := moltcbor.Marshal(reg)
 		s.conn.PublishEntry(moltcbor.EntryTypeAgentRegistration, regPayload)
 
+		s.joinStatuses.Store(joinID, &joinStatusEntry{Status: "registering"})
 		s.joinChannelsAndIntroduce(kp.Public, req.DisplayName, req.Title, req.Team)
 		s.conn.EstablishPairwiseSecrets()
 
@@ -402,13 +453,13 @@ func (s *Server) handleJoinRendezvous(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleJoinStatus(w http.ResponseWriter, r *http.Request) {
 	joinID := r.PathValue("id")
 	if joinID == "" {
-		httpError(w, "join ID required", 400)
+		writeError(w, r, fmt.Errorf("join ID required"), 400)
 		return
 	}
 
 	entry, ok := s.joinStatuses.Load(joinID)
 	if !ok {
-		httpError(w, "unknown join ID", 404)
+		writeError(w, r, fmt.Errorf("unknown join ID"), 404)
 		return
 	}
 
@@ -484,6 +535,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			"Invalid request body.", nil), 400)
 		return
 	}
+	req.Content = sanitizeText(req.Content)
 	if req.ChannelID == "" || req.Content == "" {
 		writeError(w, r, merrors.New("message.send.missing_fields", merrors.Fatal,
 			"Channel ID and content are required.", nil), 400)
@@ -580,6 +632,292 @@ func (s *Server) handleDeleteMessage(w http.ResponseWriter, r *http.Request) {
 	writeSuccess(w, r, map[string]any{"status": "deleted"})
 }
 
+// --- Edit Message ---
+
+type editMessageRequest struct {
+	MessageHash string `json:"message_hash"` // hex hash of message to edit
+	ChannelID   string `json:"channel_id"`   // hex channel ID
+	Content     string `json:"content"`      // new content
+}
+
+func (s *Server) handleEditMessage(w http.ResponseWriter, r *http.Request) {
+	var req editMessageRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, r, merrors.New("message.edit.invalid_request", merrors.Fatal,
+			"Invalid request body.", nil), 400)
+		return
+	}
+	req.Content = sanitizeText(req.Content)
+	if req.MessageHash == "" || req.ChannelID == "" || req.Content == "" {
+		writeError(w, r, merrors.New("message.edit.missing_fields", merrors.Fatal,
+			"Message hash, channel ID, and content are required.", nil), 400)
+		return
+	}
+	if len(req.Content) > 32768 {
+		writeError(w, r, merrors.New("message.edit.too_large", merrors.Fatal,
+			"Message content exceeds maximum size of 32KB.", nil), 400)
+		return
+	}
+
+	msgHash, err := hex.DecodeString(req.MessageHash)
+	if err != nil {
+		writeError(w, r, merrors.New("message.edit.invalid_hash", merrors.Fatal,
+			"Invalid message hash format.", nil), 400)
+		return
+	}
+	channelID, err := hex.DecodeString(req.ChannelID)
+	if err != nil {
+		writeError(w, r, merrors.New("message.edit.invalid_channel", merrors.Fatal,
+			"Invalid channel ID format.", nil), 400)
+		return
+	}
+
+	// Verify the message exists and was authored by this agent
+	entry, err := s.conn.LogDB().GetEntry(msgHash)
+	if err != nil || entry == nil {
+		writeError(w, r, merrors.New("message.edit.not_found", merrors.Fatal,
+			"Message not found.", nil), 404)
+		return
+	}
+
+	kp := s.conn.KeyPair()
+	if !crypto.ConstantTimeEqual(entry.AuthorKey, kp.Public) {
+		writeError(w, r, merrors.New("message.edit.forbidden", merrors.Fatal,
+			"You can only edit your own messages.", nil), 403)
+		return
+	}
+
+	edit := moltcbor.MessageEdit{
+		MessageHash: msgHash,
+		ChannelID:   channelID,
+		NewContent:  []byte(req.Content),
+	}
+	payload, err := moltcbor.Marshal(edit)
+	if err != nil {
+		writeError(w, r, merrors.New("message.edit.marshal_failed", merrors.Fatal,
+			"Failed to prepare edit entry.", nil), 500)
+		return
+	}
+	if err := s.conn.PublishEntry(moltcbor.EntryTypeMessageEdit, payload); err != nil {
+		writeError(w, r, merrors.New("message.edit.publish_failed", merrors.Fatal,
+			fmt.Sprintf("Failed to publish edit: %s", err.Error()), nil), 500)
+		return
+	}
+
+	writeSuccess(w, r, map[string]any{"status": "edited"})
+}
+
+// --- Message Reactions ---
+
+type reactMessageRequest struct {
+	MessageHash string `json:"message_hash"` // hex hash of message
+	ChannelID   string `json:"channel_id"`   // hex channel ID
+	Emoji       string `json:"emoji"`        // emoji string (e.g., "thumbsup")
+}
+
+func (s *Server) handleReactMessage(w http.ResponseWriter, r *http.Request) {
+	s.handleReaction(w, r, false)
+}
+
+func (s *Server) handleUnreactMessage(w http.ResponseWriter, r *http.Request) {
+	s.handleReaction(w, r, true)
+}
+
+func (s *Server) handleReaction(w http.ResponseWriter, r *http.Request, remove bool) {
+	var req reactMessageRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, r, merrors.New("message.react.invalid_request", merrors.Fatal,
+			"Invalid request body.", nil), 400)
+		return
+	}
+	if req.MessageHash == "" || req.ChannelID == "" || req.Emoji == "" {
+		writeError(w, r, merrors.New("message.react.missing_fields", merrors.Fatal,
+			"Message hash, channel ID, and emoji are required.", nil), 400)
+		return
+	}
+	if len(req.Emoji) > 64 {
+		writeError(w, r, merrors.New("message.react.emoji_too_long", merrors.Fatal,
+			"Emoji string exceeds maximum of 64 characters.", nil), 400)
+		return
+	}
+
+	msgHash, err := hex.DecodeString(req.MessageHash)
+	if err != nil {
+		writeError(w, r, merrors.New("message.react.invalid_hash", merrors.Fatal,
+			"Invalid message hash format.", nil), 400)
+		return
+	}
+	channelID, err := hex.DecodeString(req.ChannelID)
+	if err != nil {
+		writeError(w, r, merrors.New("message.react.invalid_channel", merrors.Fatal,
+			"Invalid channel ID format.", nil), 400)
+		return
+	}
+
+	// Verify the message exists
+	entry, err := s.conn.LogDB().GetEntry(msgHash)
+	if err != nil || entry == nil {
+		writeError(w, r, merrors.New("message.react.not_found", merrors.Fatal,
+			"Message not found.", nil), 404)
+		return
+	}
+
+	react := moltcbor.Reaction{
+		MessageHash: msgHash,
+		ChannelID:   channelID,
+		Emoji:       req.Emoji,
+		Remove:      remove,
+	}
+	payload, err := moltcbor.Marshal(react)
+	if err != nil {
+		writeError(w, r, merrors.New("message.react.marshal_failed", merrors.Fatal,
+			"Failed to prepare reaction entry.", nil), 500)
+		return
+	}
+	if err := s.conn.PublishEntry(moltcbor.EntryTypeReaction, payload); err != nil {
+		writeError(w, r, merrors.New("message.react.publish_failed", merrors.Fatal,
+			fmt.Sprintf("Failed to publish reaction: %s", err.Error()), nil), 500)
+		return
+	}
+
+	status := "reacted"
+	if remove {
+		status = "unreacted"
+	}
+	writeSuccess(w, r, map[string]any{"status": status})
+}
+
+func (s *Server) handleGetReactions(w http.ResponseWriter, r *http.Request) {
+	hashHex := r.PathValue("hash")
+	if hashHex == "" {
+		writeError(w, r, merrors.New("message.reactions.missing_hash", merrors.Fatal,
+			"Message hash is required.", nil), 400)
+		return
+	}
+
+	// Verify the hash is valid hex
+	if _, err := hex.DecodeString(hashHex); err != nil {
+		writeError(w, r, merrors.New("message.reactions.invalid_hash", merrors.Fatal,
+			"Invalid message hash format.", nil), 400)
+		return
+	}
+
+	reactions := s.conn.GetMessageReactions(hashHex)
+	writeSuccess(w, r, reactions)
+}
+
+// --- Channel Pinning ---
+
+type pinMessageRequest struct {
+	ChannelID   string `json:"channel_id"`   // hex channel ID
+	MessageHash string `json:"message_hash"` // hex message hash
+}
+
+func (s *Server) handlePinMessage(w http.ResponseWriter, r *http.Request) {
+	s.handlePin(w, r, false)
+}
+
+func (s *Server) handleUnpinMessage(w http.ResponseWriter, r *http.Request) {
+	s.handlePin(w, r, true)
+}
+
+func (s *Server) handlePin(w http.ResponseWriter, r *http.Request, unpin bool) {
+	var req pinMessageRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, r, merrors.New("channel.pin.invalid_request", merrors.Fatal,
+			"Invalid request body.", nil), 400)
+		return
+	}
+	if req.ChannelID == "" || req.MessageHash == "" {
+		writeError(w, r, merrors.New("channel.pin.missing_fields", merrors.Fatal,
+			"Channel ID and message hash are required.", nil), 400)
+		return
+	}
+
+	channelID, err := hex.DecodeString(req.ChannelID)
+	if err != nil {
+		writeError(w, r, merrors.New("channel.pin.invalid_channel", merrors.Fatal,
+			"Invalid channel ID format.", nil), 400)
+		return
+	}
+	msgHash, err := hex.DecodeString(req.MessageHash)
+	if err != nil {
+		writeError(w, r, merrors.New("channel.pin.invalid_hash", merrors.Fatal,
+			"Invalid message hash format.", nil), 400)
+		return
+	}
+
+	// Verify the channel exists and caller is a member
+	ch := s.conn.Channels().Get(channelID)
+	if ch == nil {
+		writeError(w, r, merrors.New("channel.pin.not_found", merrors.Fatal,
+			"Channel not found.", nil), 404)
+		return
+	}
+
+	kp := s.conn.KeyPair()
+	selfHex := fmt.Sprintf("%x", kp.Public)
+	if _, isMember := ch.Members[selfHex]; !isMember {
+		writeError(w, r, merrors.New("channel.pin.not_member", merrors.Fatal,
+			"You must be a member of the channel to pin messages.", nil), 403)
+		return
+	}
+
+	// Verify the message exists
+	entry, err := s.conn.LogDB().GetEntry(msgHash)
+	if err != nil || entry == nil {
+		writeError(w, r, merrors.New("channel.pin.message_not_found", merrors.Fatal,
+			"Message not found.", nil), 404)
+		return
+	}
+
+	pin := moltcbor.ChannelPin{
+		ChannelID:   channelID,
+		MessageHash: msgHash,
+	}
+	payload, err := moltcbor.Marshal(pin)
+	if err != nil {
+		writeError(w, r, merrors.New("channel.pin.marshal_failed", merrors.Fatal,
+			"Failed to prepare pin entry.", nil), 500)
+		return
+	}
+
+	entryType := moltcbor.EntryTypeChannelPin
+	if unpin {
+		entryType = moltcbor.EntryTypeChannelUnpin
+	}
+	if err := s.conn.PublishEntry(entryType, payload); err != nil {
+		writeError(w, r, merrors.New("channel.pin.publish_failed", merrors.Fatal,
+			fmt.Sprintf("Failed to publish pin: %s", err.Error()), nil), 500)
+		return
+	}
+
+	status := "pinned"
+	if unpin {
+		status = "unpinned"
+	}
+	writeSuccess(w, r, map[string]any{"status": status})
+}
+
+func (s *Server) handleGetChannelPins(w http.ResponseWriter, r *http.Request) {
+	channelIDHex := r.PathValue("id")
+	if channelIDHex == "" {
+		writeError(w, r, merrors.New("channel.pins.missing_id", merrors.Fatal,
+			"Channel ID is required.", nil), 400)
+		return
+	}
+
+	// Verify the channel ID is valid hex
+	if _, err := hex.DecodeString(channelIDHex); err != nil {
+		writeError(w, r, merrors.New("channel.pins.invalid_id", merrors.Fatal,
+			"Invalid channel ID format.", nil), 400)
+		return
+	}
+
+	pins := s.conn.GetChannelPins(channelIDHex)
+	writeSuccess(w, r, map[string]any{"pinned_messages": pins})
+}
+
 // --- Send DM ---
 
 type sendDMRequest struct {
@@ -674,6 +1012,18 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// since_hash: look up the entry's timestamp and use it as the since value.
+	// This gives hash-level cursor precision while reusing the existing query.
+	if sh := r.URL.Query().Get("since_hash"); sh != "" {
+		hashBytes, err := hex.DecodeString(sh)
+		if err == nil {
+			entry, err := s.conn.LogDB().GetEntry(hashBytes)
+			if err == nil && entry != nil {
+				since = entry.CreatedAt
+			}
+		}
+	}
+
 	limit := 100
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if v, err := strconv.Atoi(l); err == nil && v > 0 && v <= 1000 {
@@ -703,6 +1053,17 @@ func (s *Server) handleGetActivity(w http.ResponseWriter, r *http.Request) {
 	if sv := r.URL.Query().Get("since"); sv != "" {
 		if v, err := strconv.ParseInt(sv, 10, 64); err == nil {
 			since = v
+		}
+	}
+
+	// since_hash: look up the entry's timestamp and use it as the since value.
+	if sh := r.URL.Query().Get("since_hash"); sh != "" {
+		hashBytes, err := hex.DecodeString(sh)
+		if err == nil {
+			entry, err := s.conn.LogDB().GetEntry(hashBytes)
+			if err == nil && entry != nil {
+				since = entry.CreatedAt
+			}
 		}
 	}
 
@@ -796,7 +1157,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	defer s.conn.Unsubscribe(sub)
 
 	// Send initial data
-	s.sendSSEActivity(w, flusher, &since, 200)
+	since = s.sendSSEActivity(w, flusher, since, 200)
 
 	// Keep-alive ticker to detect dead connections
 	keepAlive := time.NewTicker(15 * time.Second)
@@ -805,7 +1166,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-sub:
-			s.sendSSEActivity(w, flusher, &since, 200)
+			since = s.sendSSEActivity(w, flusher, since, 200)
 		case <-keepAlive.C:
 			fmt.Fprintf(w, ": keepalive\n\n")
 			flusher.Flush()
@@ -815,25 +1176,29 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) sendSSEActivity(w http.ResponseWriter, flusher http.Flusher, since *int64, limit int) {
-	messages, err := s.conn.GetNewActivity(*since, limit)
+// sendSSEActivity fetches new activity since the given timestamp and writes it
+// as an SSE event. Returns the updated timestamp for the next poll.
+// Takes `since` by value (not pointer) to avoid data races with the caller's
+// select loop.
+func (s *Server) sendSSEActivity(w http.ResponseWriter, flusher http.Flusher, since int64, limit int) int64 {
+	messages, err := s.conn.GetNewActivity(since, limit)
 	if err != nil || len(messages) == 0 {
-		return
+		return since
 	}
 
 	latestTs, _ := s.conn.LogDB().LatestTimestamp()
-	*since = latestTs
 
 	data, err := json.Marshal(map[string]any{
 		"messages":         messages,
 		"latest_timestamp": latestTs,
 	})
 	if err != nil {
-		return
+		return since
 	}
 
 	fmt.Fprintf(w, "event: activity\ndata: %s\n\n", data)
 	flusher.Flush()
+	return latestTs
 }
 
 // --- Create Channel ---
@@ -1120,13 +1485,18 @@ func (s *Server) handleConfirmRelationship(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Publish to DAG
-	payload, _ := moltcbor.Marshal(rel)
-	tips := s.conn.DAG().Tips()
-	entry, _ := dag.NewSignedEntry(moltcbor.EntryTypeOrgRelationship, payload, s.conn.KeyPair(), tips)
-	s.conn.DAG().Insert(entry)
-	s.conn.LogDB().InsertEntry(entry.Hash[:], entry.RawCBOR, entry.AuthorKey, entry.Signature,
-		int(moltcbor.EntryTypeOrgRelationship), entry.CreatedAt, hashesToSlices(entry.Parents))
+	// Publish to DAG via publishEntry (handles rate limiting, atomic insert)
+	payload, err := moltcbor.Marshal(rel)
+	if err != nil {
+		writeError(w, r, merrors.New("org.relationship.marshal_failed", merrors.Transient,
+			"Failed to encode relationship.", nil), 500)
+		return
+	}
+	if err := s.conn.PublishEntry(moltcbor.EntryTypeOrgRelationship, payload); err != nil {
+		writeError(w, r, merrors.New("org.relationship.publish_failed", merrors.Transient,
+			"Failed to publish relationship to log.", nil), 500)
+		return
+	}
 
 	writeSuccess(w, r, map[string]any{
 		"status":      "confirmed",
@@ -1145,18 +1515,18 @@ type channelTargetRequest struct {
 func (s *Server) handleLeaveChannel(w http.ResponseWriter, r *http.Request) {
 	var req channelTargetRequest
 	if err := readJSON(r, &req); err != nil {
-		httpError(w, "invalid request body", 400)
+		writeError(w, r, fmt.Errorf("invalid request body"), 400)
 		return
 	}
 
 	channelID, err := hex.DecodeString(req.ChannelID)
 	if err != nil {
-		httpError(w, "invalid channel ID", 400)
+		writeError(w, r, fmt.Errorf("invalid channel ID"), 400)
 		return
 	}
 
 	if err := s.conn.PublishChannelLeave(channelID); err != nil {
-		httpError(w, err.Error(), 400)
+		writeError(w, r, err, 400)
 		return
 	}
 
@@ -1166,18 +1536,18 @@ func (s *Server) handleLeaveChannel(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleArchiveChannel(w http.ResponseWriter, r *http.Request) {
 	var req channelTargetRequest
 	if err := readJSON(r, &req); err != nil {
-		httpError(w, "invalid request body", 400)
+		writeError(w, r, fmt.Errorf("invalid request body"), 400)
 		return
 	}
 
 	channelID, err := hex.DecodeString(req.ChannelID)
 	if err != nil {
-		httpError(w, "invalid channel ID", 400)
+		writeError(w, r, fmt.Errorf("invalid channel ID"), 400)
 		return
 	}
 
 	if err := s.conn.PublishChannelArchive(channelID); err != nil {
-		httpError(w, err.Error(), 400)
+		writeError(w, r, err, 400)
 		return
 	}
 
@@ -1187,18 +1557,18 @@ func (s *Server) handleArchiveChannel(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUnarchiveChannel(w http.ResponseWriter, r *http.Request) {
 	var req channelTargetRequest
 	if err := readJSON(r, &req); err != nil {
-		httpError(w, "invalid request body", 400)
+		writeError(w, r, fmt.Errorf("invalid request body"), 400)
 		return
 	}
 
 	channelID, err := hex.DecodeString(req.ChannelID)
 	if err != nil {
-		httpError(w, "invalid channel ID", 400)
+		writeError(w, r, fmt.Errorf("invalid channel ID"), 400)
 		return
 	}
 
 	if err := s.conn.PublishChannelUnarchive(channelID); err != nil {
-		httpError(w, err.Error(), 400)
+		writeError(w, r, err, 400)
 		return
 	}
 
@@ -1208,24 +1578,24 @@ func (s *Server) handleUnarchiveChannel(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleInviteToChannel(w http.ResponseWriter, r *http.Request) {
 	var req channelTargetRequest
 	if err := readJSON(r, &req); err != nil {
-		httpError(w, "invalid request body", 400)
+		writeError(w, r, fmt.Errorf("invalid request body"), 400)
 		return
 	}
 
 	channelID, err := hex.DecodeString(req.ChannelID)
 	if err != nil {
-		httpError(w, "invalid channel ID", 400)
+		writeError(w, r, fmt.Errorf("invalid channel ID"), 400)
 		return
 	}
 
 	agentKey, err := hex.DecodeString(req.AgentKey)
 	if err != nil || len(agentKey) != 32 {
-		httpError(w, "invalid agent key", 400)
+		writeError(w, r, fmt.Errorf("invalid agent key"), 400)
 		return
 	}
 
 	if err := s.conn.PublishMemberInvite(channelID, agentKey); err != nil {
-		httpError(w, err.Error(), 400)
+		writeError(w, r, err, 400)
 		return
 	}
 
@@ -1235,24 +1605,24 @@ func (s *Server) handleInviteToChannel(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRemoveFromChannel(w http.ResponseWriter, r *http.Request) {
 	var req channelTargetRequest
 	if err := readJSON(r, &req); err != nil {
-		httpError(w, "invalid request body", 400)
+		writeError(w, r, fmt.Errorf("invalid request body"), 400)
 		return
 	}
 
 	channelID, err := hex.DecodeString(req.ChannelID)
 	if err != nil {
-		httpError(w, "invalid channel ID", 400)
+		writeError(w, r, fmt.Errorf("invalid channel ID"), 400)
 		return
 	}
 
 	agentKey, err := hex.DecodeString(req.AgentKey)
 	if err != nil || len(agentKey) != 32 {
-		httpError(w, "invalid agent key", 400)
+		writeError(w, r, fmt.Errorf("invalid agent key"), 400)
 		return
 	}
 
 	if err := s.conn.PublishMemberRemove(channelID, agentKey); err != nil {
-		httpError(w, err.Error(), 400)
+		writeError(w, r, err, 400)
 		return
 	}
 
@@ -1262,24 +1632,24 @@ func (s *Server) handleRemoveFromChannel(w http.ResponseWriter, r *http.Request)
 func (s *Server) handlePromoteAdmin(w http.ResponseWriter, r *http.Request) {
 	var req channelTargetRequest
 	if err := readJSON(r, &req); err != nil {
-		httpError(w, "invalid request body", 400)
+		writeError(w, r, fmt.Errorf("invalid request body"), 400)
 		return
 	}
 
 	channelID, err := hex.DecodeString(req.ChannelID)
 	if err != nil {
-		httpError(w, "invalid channel ID", 400)
+		writeError(w, r, fmt.Errorf("invalid channel ID"), 400)
 		return
 	}
 
 	agentKey, err := hex.DecodeString(req.AgentKey)
 	if err != nil || len(agentKey) != 32 {
-		httpError(w, "invalid agent key", 400)
+		writeError(w, r, fmt.Errorf("invalid agent key"), 400)
 		return
 	}
 
 	if err := s.conn.PublishAdminPromote(channelID, agentKey); err != nil {
-		httpError(w, err.Error(), 400)
+		writeError(w, r, err, 400)
 		return
 	}
 
@@ -1289,24 +1659,24 @@ func (s *Server) handlePromoteAdmin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDemoteAdmin(w http.ResponseWriter, r *http.Request) {
 	var req channelTargetRequest
 	if err := readJSON(r, &req); err != nil {
-		httpError(w, "invalid request body", 400)
+		writeError(w, r, fmt.Errorf("invalid request body"), 400)
 		return
 	}
 
 	channelID, err := hex.DecodeString(req.ChannelID)
 	if err != nil {
-		httpError(w, "invalid channel ID", 400)
+		writeError(w, r, fmt.Errorf("invalid channel ID"), 400)
 		return
 	}
 
 	agentKey, err := hex.DecodeString(req.AgentKey)
 	if err != nil || len(agentKey) != 32 {
-		httpError(w, "invalid agent key", 400)
+		writeError(w, r, fmt.Errorf("invalid agent key"), 400)
 		return
 	}
 
 	if err := s.conn.PublishAdminDemote(channelID, agentKey); err != nil {
-		httpError(w, err.Error(), 400)
+		writeError(w, r, err, 400)
 		return
 	}
 
@@ -1324,33 +1694,33 @@ type sendThreadReplyRequest struct {
 func (s *Server) handleSendThreadReply(w http.ResponseWriter, r *http.Request) {
 	var req sendThreadReplyRequest
 	if err := readJSON(r, &req); err != nil {
-		httpError(w, "invalid request body", 400)
+		writeError(w, r, fmt.Errorf("invalid request body"), 400)
 		return
 	}
 
 	channelID, err := hex.DecodeString(req.ChannelID)
 	if err != nil {
-		httpError(w, "invalid channel ID", 400)
+		writeError(w, r, fmt.Errorf("invalid channel ID"), 400)
 		return
 	}
 
 	parentHash, err := hex.DecodeString(req.ParentHash)
 	if err != nil {
-		httpError(w, "invalid parent hash", 400)
+		writeError(w, r, fmt.Errorf("invalid parent hash"), 400)
 		return
 	}
 
 	if req.Content == "" {
-		httpError(w, "content required", 400)
+		writeError(w, r, fmt.Errorf("content required"), 400)
 		return
 	}
 	if len(req.Content) > 32768 {
-		httpError(w, "content exceeds maximum size of 32KB", 400)
+		writeError(w, r, fmt.Errorf("content exceeds maximum size of 32KB"), 400)
 		return
 	}
 
 	if err := s.conn.SendThreadMessage(channelID, parentHash, []byte(req.Content)); err != nil {
-		httpError(w, err.Error(), 500)
+		writeError(w, r, err, 500)
 		return
 	}
 
@@ -1376,7 +1746,7 @@ func (s *Server) handleGetThreadReplies(w http.ResponseWriter, r *http.Request) 
 
 	replies, err := s.conn.GetThreadReplies(parentHashHex, since, limit)
 	if err != nil {
-		httpError(w, err.Error(), 500)
+		writeError(w, r, err, 500)
 		return
 	}
 
@@ -1498,14 +1868,14 @@ func (s *Server) handleSelfRevoke(w http.ResponseWriter, r *http.Request) {
 
 	payload, err := moltcbor.Marshal(rev)
 	if err != nil {
-		httpError(w, "marshal revocation: "+err.Error(), 500)
+		writeError(w, r, fmt.Errorf("marshal revocation: %w", err), 500)
 		return
 	}
 
 	tips := s.conn.DAG().Tips()
 	entry, err := dag.NewSignedEntry(moltcbor.EntryTypeRevocation, payload, s.conn.KeyPair(), tips)
 	if err != nil {
-		httpError(w, "create entry: "+err.Error(), 500)
+		writeError(w, r, fmt.Errorf("create entry: %w", err), 500)
 		return
 	}
 
@@ -1528,19 +1898,19 @@ type managerRevokeRequest struct {
 func (s *Server) handleManagerRevoke(w http.ResponseWriter, r *http.Request) {
 	var req managerRevokeRequest
 	if err := readJSON(r, &req); err != nil {
-		httpError(w, "invalid request body", 400)
+		writeError(w, r, fmt.Errorf("invalid request body"), 400)
 		return
 	}
 
 	targetKey, err := hex.DecodeString(req.TargetKeyHex)
 	if err != nil || len(targetKey) != 32 {
-		httpError(w, "invalid target key", 400)
+		writeError(w, r, fmt.Errorf("invalid target key"), 400)
 		return
 	}
 
 	rev, err := identity.CreateManagerRevocation(targetKey, s.conn.KeyPair(), s.conn.OrgMap())
 	if err != nil {
-		httpError(w, err.Error(), 403)
+		writeError(w, r, err, 403)
 		return
 	}
 
@@ -1569,22 +1939,22 @@ type quorumRevokeRequest struct {
 func (s *Server) handleQuorumRevoke(w http.ResponseWriter, r *http.Request) {
 	var req quorumRevokeRequest
 	if err := readJSON(r, &req); err != nil {
-		httpError(w, "invalid request body", 400)
+		writeError(w, r, fmt.Errorf("invalid request body"), 400)
 		return
 	}
 
 	revokedKeyHash, err := hex.DecodeString(req.RevokedKeyHashHex)
 	if err != nil {
-		httpError(w, "invalid revoked key hash", 400)
+		writeError(w, r, fmt.Errorf("invalid revoked key hash"), 400)
 		return
 	}
 
 	if len(req.SignaturesHex) < 3 {
-		httpError(w, "quorum requires at least 3 signatures", 400)
+		writeError(w, r, fmt.Errorf("quorum requires at least 3 signatures"), 400)
 		return
 	}
 	if len(req.SignaturesHex) != len(req.RevokersHex) {
-		httpError(w, "signatures and revokers count mismatch", 400)
+		writeError(w, r, fmt.Errorf("signatures and revokers count mismatch"), 400)
 		return
 	}
 
@@ -1593,12 +1963,12 @@ func (s *Server) handleQuorumRevoke(w http.ResponseWriter, r *http.Request) {
 	for i := range req.SignaturesHex {
 		sigs[i], err = hex.DecodeString(req.SignaturesHex[i])
 		if err != nil {
-			httpError(w, "invalid signature", 400)
+			writeError(w, r, fmt.Errorf("invalid signature"), 400)
 			return
 		}
 		revokers[i], err = hex.DecodeString(req.RevokersHex[i])
 		if err != nil {
-			httpError(w, "invalid revoker key", 400)
+			writeError(w, r, fmt.Errorf("invalid revoker key"), 400)
 			return
 		}
 	}
@@ -1612,7 +1982,7 @@ func (s *Server) handleQuorumRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := identity.VerifyRevocation(rev); err != nil {
-		httpError(w, "invalid revocation: "+err.Error(), 400)
+		writeError(w, r, fmt.Errorf("invalid revocation: %w", err), 400)
 		return
 	}
 
@@ -1646,30 +2016,17 @@ func readJSON(r *http.Request, v any) error {
 	return json.Unmarshal(body, v)
 }
 
-// httpError sends a JSON error response. Maps common error messages to proper HTTP codes.
-func httpError(w http.ResponseWriter, msg string, code int) {
-	// Upgrade generic 400 to more specific codes based on error message
-	if code == 400 {
-		code = errorCodeForChannelOp(msg)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
-}
 
-func errorCodeForChannelOp(msg string) int {
-	switch {
-	case strings.Contains(msg, "admin required"):
-		return 403
-	case strings.Contains(msg, "not a member"):
-		return 403
-	case strings.Contains(msg, "cannot leave permanent"):
-		return 403
-	case strings.Contains(msg, "channel not found"):
-		return 404
-	default:
-		return 400
+// sanitizeText strips control characters (\x00-\x1f except \t, \n, \r)
+// from free-text fields to prevent log injection and terminal escape attacks.
+func sanitizeText(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r == '\t' || r == '\n' || r == '\r' || r >= 0x20 {
+			b.WriteRune(r)
+		}
 	}
+	return b.String()
 }
 
 func hashesToSlices(hashes [][32]byte) [][]byte {
@@ -1680,4 +2037,363 @@ func hashesToSlices(hashes [][32]byte) [][]byte {
 		result[i] = b
 	}
 	return result
+}
+
+// --- Channel Update (rename/description) ---
+
+type updateChannelRequest struct {
+	ChannelID   string `json:"channel_id"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+func (s *Server) handleUpdateChannel(w http.ResponseWriter, r *http.Request) {
+	var req updateChannelRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, r, merrors.New("channel.update.invalid_request", merrors.Fatal,
+			"Invalid request body.", nil), 400)
+		return
+	}
+	req.Name = sanitizeText(req.Name)
+	req.Description = sanitizeText(req.Description)
+	if req.ChannelID == "" {
+		writeError(w, r, merrors.New("channel.update.missing_channel_id", merrors.Fatal,
+			"Channel ID is required.", nil), 400)
+		return
+	}
+	if req.Name == "" && req.Description == "" {
+		writeError(w, r, merrors.New("channel.update.missing_fields", merrors.Fatal,
+			"At least one of name or description is required.", nil), 400)
+		return
+	}
+	if len(req.Name) > 80 {
+		writeError(w, r, merrors.New("channel.update.name_too_long", merrors.Fatal,
+			"Channel name must be 80 characters or fewer.", nil), 400)
+		return
+	}
+
+	channelID, err := hex.DecodeString(req.ChannelID)
+	if err != nil {
+		writeError(w, r, merrors.New("channel.update.invalid_channel_id", merrors.Fatal,
+			"The channel ID format is invalid.", nil), 400)
+		return
+	}
+
+	ch := s.conn.Channels().Get(channelID)
+	if ch == nil {
+		writeError(w, r, merrors.New("channel.update.not_found", merrors.Fatal,
+			"Channel not found.", nil), 404)
+		return
+	}
+
+	kp := s.conn.KeyPair()
+	if !ch.IsAdmin(kp.Public) {
+		writeError(w, r, merrors.New("channel.update.forbidden", merrors.Fatal,
+			"Only channel admins can update channel details.", nil), 403)
+		return
+	}
+
+	cu := moltcbor.ChannelUpdate{
+		ChannelID:   channelID,
+		Name:        req.Name,
+		Description: req.Description,
+	}
+	payload, err := moltcbor.Marshal(cu)
+	if err != nil {
+		writeError(w, r, merrors.New("channel.update.marshal_failed", merrors.Fatal,
+			"Failed to prepare channel update.", nil), 500)
+		return
+	}
+	if err := s.conn.PublishEntry(moltcbor.EntryTypeChannelUpdate, payload); err != nil {
+		writeError(w, r, merrors.New("channel.update.publish_failed", merrors.Transient,
+			"Failed to publish channel update.", nil), 500)
+		return
+	}
+
+	// Apply locally
+	oldName := ch.Name
+	ch.Update(req.Name, req.Description)
+	if req.Name != "" && req.Name != oldName {
+		s.conn.Channels().UpdateName(ch, oldName, req.Name)
+	}
+
+	writeSuccess(w, r, map[string]any{
+		"status":     "updated",
+		"channel_id": req.ChannelID,
+	})
+}
+
+// --- Agent Profile Update ---
+
+type updateIdentityRequest struct {
+	DisplayName string `json:"display_name,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Team        string `json:"team,omitempty"`
+	HumanName   string `json:"human_name,omitempty"`
+}
+
+func (s *Server) handleUpdateIdentity(w http.ResponseWriter, r *http.Request) {
+	var req updateIdentityRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, r, merrors.New("identity.update.invalid_request", merrors.Fatal,
+			"Invalid request body.", nil), 400)
+		return
+	}
+	req.DisplayName = sanitizeText(req.DisplayName)
+	req.Title = sanitizeText(req.Title)
+	req.Team = sanitizeText(req.Team)
+	req.HumanName = sanitizeText(req.HumanName)
+
+	if req.DisplayName == "" && req.Title == "" && req.Team == "" && req.HumanName == "" {
+		writeError(w, r, merrors.New("identity.update.missing_fields", merrors.Fatal,
+			"At least one field to update is required.", nil), 400)
+		return
+	}
+	if len(req.DisplayName) > 128 || len(req.Title) > 128 || len(req.Team) > 128 {
+		writeError(w, r, merrors.New("identity.update.fields_too_long", merrors.Fatal,
+			"Display name, title, and team must be 128 characters or fewer.", nil), 400)
+		return
+	}
+
+	kp := s.conn.KeyPair()
+	upd := moltcbor.AgentUpdate{
+		PublicKey:   kp.Public,
+		DisplayName: req.DisplayName,
+		Title:       req.Title,
+		Team:        req.Team,
+		HumanName:   req.HumanName,
+	}
+	payload, err := moltcbor.Marshal(upd)
+	if err != nil {
+		writeError(w, r, merrors.New("identity.update.marshal_failed", merrors.Fatal,
+			"Failed to prepare identity update.", nil), 500)
+		return
+	}
+	if err := s.conn.PublishEntry(moltcbor.EntryTypeAgentUpdate, payload); err != nil {
+		writeError(w, r, merrors.New("identity.update.publish_failed", merrors.Transient,
+			"Failed to publish identity update.", nil), 500)
+		return
+	}
+
+	// Apply locally
+	s.conn.Registry().ApplyAgentUpdate(&upd)
+
+	writeSuccess(w, r, map[string]any{
+		"status": "updated",
+	})
+}
+
+// --- Read Receipts ---
+
+type markReadRequest struct {
+	ChannelID   string `json:"channel_id"`
+	MessageHash string `json:"message_hash"`
+	Timestamp   int64  `json:"timestamp"`
+}
+
+func (s *Server) handleMarkRead(w http.ResponseWriter, r *http.Request) {
+	var req markReadRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, r, merrors.New("read.mark.invalid_request", merrors.Fatal,
+			"Invalid request body.", nil), 400)
+		return
+	}
+	if req.ChannelID == "" || req.MessageHash == "" || req.Timestamp == 0 {
+		writeError(w, r, merrors.New("read.mark.missing_fields", merrors.Fatal,
+			"Channel ID, message hash, and timestamp are required.", nil), 400)
+		return
+	}
+
+	if err := s.conn.KeyDB().SetReadReceipt(req.ChannelID, req.MessageHash, req.Timestamp); err != nil {
+		writeError(w, r, merrors.New("read.mark.store_failed", merrors.Transient,
+			"Failed to store read receipt.", nil), 500)
+		return
+	}
+
+	writeSuccess(w, r, map[string]any{"status": "marked"})
+}
+
+func (s *Server) handleGetUnread(w http.ResponseWriter, r *http.Request) {
+	kp := s.conn.KeyPair()
+	channels := s.conn.Channels().List(kp.Public)
+
+	type unreadInfo struct {
+		ChannelID    string `json:"channel_id"`
+		ChannelName  string `json:"channel_name"`
+		LastReadHash string `json:"last_read_hash,omitempty"`
+		LastReadTs   int64  `json:"last_read_ts"`
+		HasUnread    bool   `json:"has_unread"`
+	}
+
+	var result []unreadInfo
+	for _, ch := range channels {
+		chIDHex := fmt.Sprintf("%x", ch.ID)
+		lastHash, lastTs, err := s.conn.KeyDB().GetReadReceipt(chIDHex)
+		if err != nil {
+			continue
+		}
+
+		// Check if there are messages newer than the last read timestamp
+		latestEntries, err := s.conn.LogDB().EntriesByTypeInRange(int(moltcbor.EntryTypeMessage), lastTs, 1)
+		if err != nil {
+			continue
+		}
+
+		// Filter entries to only those in this channel
+		hasUnread := false
+		for _, entry := range latestEntries {
+			payload := moltcbor.DecodePayload(entry.RawCBOR)
+			if payload == nil {
+				continue
+			}
+			var msg moltcbor.Message
+			if err := moltcbor.Unmarshal(payload, &msg); err != nil {
+				continue
+			}
+			if fmt.Sprintf("%x", msg.ChannelID) == chIDHex {
+				hasUnread = true
+				break
+			}
+		}
+
+		result = append(result, unreadInfo{
+			ChannelID:    chIDHex,
+			ChannelName:  ch.Name,
+			LastReadHash: lastHash,
+			LastReadTs:   lastTs,
+			HasUnread:    hasUnread,
+		})
+	}
+
+	writeSuccess(w, r, result)
+}
+
+// --- Quorum Revocation Ceremony ---
+
+type quorumProposeRequest struct {
+	TargetKey string `json:"target_key"` // hex-encoded public key
+	Reason    int    `json:"reason"`
+}
+
+func (s *Server) handleQuorumPropose(w http.ResponseWriter, r *http.Request) {
+	var req quorumProposeRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, r, merrors.New("revoke.quorum.propose.invalid_request", merrors.Fatal,
+			"Invalid request body.", nil), 400)
+		return
+	}
+	if req.TargetKey == "" || req.Reason == 0 {
+		writeError(w, r, merrors.New("revoke.quorum.propose.missing_fields", merrors.Fatal,
+			"Target key and reason are required.", nil), 400)
+		return
+	}
+
+	targetKey, err := hex.DecodeString(req.TargetKey)
+	if err != nil || len(targetKey) != 32 {
+		writeError(w, r, merrors.New("revoke.quorum.propose.invalid_key", merrors.Fatal,
+			"Invalid target key format.", nil), 400)
+		return
+	}
+
+	// Verify target is a registered agent
+	if !s.conn.Registry().IsRegisteredAgent(targetKey) {
+		writeError(w, r, merrors.New("revoke.quorum.propose.unknown_agent", merrors.Fatal,
+			"Target key does not belong to a registered agent.", nil), 404)
+		return
+	}
+
+	proposalID := fmt.Sprintf("%x", crypto.RandomBytes(16))
+	createdAt := time.Now().Unix()
+
+	if err := s.conn.KeyDB().CreateRevocationProposal(proposalID, req.TargetKey, req.Reason, createdAt); err != nil {
+		writeError(w, r, merrors.New("revoke.quorum.propose.store_failed", merrors.Transient,
+			"Failed to store revocation proposal.", nil), 500)
+		return
+	}
+
+	writeSuccess(w, r, map[string]any{
+		"status":      "proposed",
+		"proposal_id": proposalID,
+	})
+}
+
+func (s *Server) handleQuorumGetProposal(w http.ResponseWriter, r *http.Request) {
+	proposalID := r.PathValue("id")
+	if proposalID == "" {
+		writeError(w, r, merrors.New("revoke.quorum.get.missing_id", merrors.Fatal,
+			"Proposal ID is required.", nil), 400)
+		return
+	}
+
+	targetKey, reason, status, sigs, err := s.conn.KeyDB().GetRevocationProposal(proposalID)
+	if err != nil {
+		writeError(w, r, merrors.New("revoke.quorum.get.not_found", merrors.Fatal,
+			"Proposal not found.", nil), 404)
+		return
+	}
+
+	writeSuccess(w, r, map[string]any{
+		"proposal_id": proposalID,
+		"target_key":  targetKey,
+		"reason":      reason,
+		"status":      status,
+		"signatures":  sigs,
+	})
+}
+
+type quorumSignRequest struct {
+	// No body needed — the signer is identified by their bearer token / key pair
+}
+
+func (s *Server) handleQuorumSign(w http.ResponseWriter, r *http.Request) {
+	proposalID := r.PathValue("id")
+	if proposalID == "" {
+		writeError(w, r, merrors.New("revoke.quorum.sign.missing_id", merrors.Fatal,
+			"Proposal ID is required.", nil), 400)
+		return
+	}
+
+	targetKey, reason, status, _, err := s.conn.KeyDB().GetRevocationProposal(proposalID)
+	if err != nil {
+		writeError(w, r, merrors.New("revoke.quorum.sign.not_found", merrors.Fatal,
+			"Proposal not found.", nil), 404)
+		return
+	}
+	if status != "pending" {
+		writeError(w, r, merrors.New("revoke.quorum.sign.not_pending", merrors.Fatal,
+			"Proposal is no longer pending.", nil), 400)
+		return
+	}
+
+	// Sign BLAKE3(target_key || reason || created_at)
+	targetKeyBytes, _ := hex.DecodeString(targetKey)
+	signData := append(targetKeyBytes, byte(reason))
+	kp := s.conn.KeyPair()
+	sig := crypto.Sign(kp.Private, signData)
+
+	signerKeyHex := fmt.Sprintf("%x", kp.Public)
+	sigHex := fmt.Sprintf("%x", sig)
+
+	if err := s.conn.KeyDB().AddRevocationSignature(proposalID, signerKeyHex, sigHex); err != nil {
+		writeError(w, r, merrors.New("revoke.quorum.sign.store_failed", merrors.Transient,
+			"Failed to store signature.", nil), 500)
+		return
+	}
+
+	writeSuccess(w, r, map[string]any{
+		"status":      "signed",
+		"proposal_id": proposalID,
+		"signer_key":  signerKeyHex,
+	})
+}
+
+func (s *Server) handleQuorumListProposals(w http.ResponseWriter, r *http.Request) {
+	proposals, err := s.conn.KeyDB().ListRevocationProposals()
+	if err != nil {
+		writeError(w, r, merrors.New("revoke.quorum.list.failed", merrors.Transient,
+			"Failed to list proposals.", nil), 500)
+		return
+	}
+
+	writeSuccess(w, r, proposals)
 }

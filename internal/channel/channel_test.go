@@ -274,6 +274,103 @@ func TestGroupDMRequiresThreeMembers(t *testing.T) {
 	}
 }
 
+func TestPrivateChannelVisibilityAfterAdminLeaves(t *testing.T) {
+	mgr := NewManager()
+	admin, _ := crypto.GenerateSigningKeyPair()
+	member, _ := crypto.GenerateSigningKeyPair()
+	outsider, _ := crypto.GenerateSigningKeyPair()
+
+	ch, _, err := CreatePrivateChannel(mgr, "secret-admin-leave", "classified", admin.Public)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Admin invites a member
+	InviteToPrivateChannel(ch, admin.Public, member.Public)
+
+	// Admin leaves the private channel
+	if err := LeavePrivateChannel(ch, admin.Public); err != nil {
+		t.Fatal(err)
+	}
+
+	// Channel should still exist (not deleted)
+	got := mgr.Get(ch.ID)
+	if got == nil {
+		t.Fatal("channel should still exist after admin leaves")
+	}
+
+	// Channel should still be private
+	if got.Type != moltcbor.ChannelTypePrivate {
+		t.Error("channel should still be private after admin leaves")
+	}
+
+	// Member should still see the channel
+	visible := mgr.List(member.Public)
+	found := false
+	for _, v := range visible {
+		if v.Name == "secret-admin-leave" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("remaining member should still see the private channel")
+	}
+
+	// Outsider should not see the channel
+	visible = mgr.List(outsider.Public)
+	for _, v := range visible {
+		if v.Name == "secret-admin-leave" {
+			t.Error("outsider should not see private channel after admin leaves")
+		}
+	}
+}
+
+func TestArchivedChannelVisibility(t *testing.T) {
+	mgr := NewManager()
+	admin, _ := crypto.GenerateSigningKeyPair()
+	member, _ := crypto.GenerateSigningKeyPair()
+
+	ch, _ := CreatePublicChannel(mgr, "to-archive", "will be archived", admin.Public)
+	JoinPublicChannel(ch, member.Public)
+
+	// Archive the channel
+	if err := ArchiveChannel(ch, admin.Public); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the channel is marked as archived
+	if !ch.Archived {
+		t.Fatal("channel should be archived")
+	}
+
+	// Channel should still be visible in listing (archived channels are visible)
+	adminChannels := mgr.List(admin.Public)
+	found := false
+	for _, v := range adminChannels {
+		if v.Name == "to-archive" {
+			found = true
+			if !v.Archived {
+				t.Error("channel should still show as archived in listing")
+			}
+		}
+	}
+	if !found {
+		t.Error("archived channel should still be visible in channel list")
+	}
+
+	// Member should also see the archived channel
+	memberChannels := mgr.List(member.Public)
+	found = false
+	for _, v := range memberChannels {
+		if v.Name == "to-archive" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("member should see archived channel in listing")
+	}
+}
+
 func TestChannelVisibility(t *testing.T) {
 	mgr := NewManager()
 	CreatePermanentChannels(mgr)

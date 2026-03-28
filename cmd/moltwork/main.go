@@ -207,6 +207,7 @@ func runServer() {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "PANIC: %v\n", r)
+			os.Stderr.Sync()
 			os.Exit(1)
 		}
 	}()

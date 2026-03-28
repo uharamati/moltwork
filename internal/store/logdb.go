@@ -32,6 +32,8 @@ func OpenLogDB(path string) (*LogDB, error) {
 		return nil, fmt.Errorf("set WAL mode: %w", err)
 	}
 
+
+
 	// Integrity check on startup (rule S4)
 	var result string
 	if err := db.QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
@@ -236,6 +238,62 @@ func (s *LogDB) AllEntries() ([]*RawEntry, error) {
 		ORDER BY e.created_at, e.hash`)
 	if err != nil {
 		return nil, fmt.Errorf("all entries: %w", err)
+	}
+	defer rows.Close()
+
+	entryMap := make(map[string]*RawEntry)
+	var order []string
+	for rows.Next() {
+		var hash, rawCBOR, authorKey, signature []byte
+		var entryType int
+		var createdAt int64
+		var parentHash []byte
+		if err := rows.Scan(&hash, &rawCBOR, &authorKey, &signature, &entryType, &createdAt, &parentHash); err != nil {
+			return nil, fmt.Errorf("scan entry: %w", err)
+		}
+		key := fmt.Sprintf("%x", hash)
+		if existing, ok := entryMap[key]; ok {
+			if parentHash != nil {
+				existing.Parents = append(existing.Parents, parentHash)
+			}
+		} else {
+			e := &RawEntry{
+				Hash:      hash,
+				RawCBOR:   rawCBOR,
+				AuthorKey: authorKey,
+				Signature: signature,
+				EntryType: entryType,
+				CreatedAt: createdAt,
+			}
+			if parentHash != nil {
+				e.Parents = [][]byte{parentHash}
+			}
+			entryMap[key] = e
+			order = append(order, key)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	entries := make([]*RawEntry, 0, len(order))
+	for _, key := range order {
+		entries = append(entries, entryMap[key])
+	}
+	return entries, nil
+}
+
+// AllEntriesPaginated returns entries with offset/limit for paginated retrieval.
+// Unlike AllEntries(), this avoids loading the entire log into memory.
+func (s *LogDB) AllEntriesPaginated(offset, limit int) ([]*RawEntry, error) {
+	rows, err := s.db.Query(`
+		SELECT e.hash, e.raw_cbor, e.author_key, e.signature, e.entry_type, e.created_at, p.parent_hash
+		FROM entries e
+		LEFT JOIN entry_parents p ON e.hash = p.entry_hash
+		ORDER BY e.created_at, e.hash
+		LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("paginated entries: %w", err)
 	}
 	defer rows.Close()
 

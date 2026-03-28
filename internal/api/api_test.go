@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -151,6 +152,136 @@ func TestUnauthorizedRejected(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 401 {
 		t.Errorf("wrong token: expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestSendMessageMalformedJSON(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+
+	srv, _ := setupTestServer(t)
+
+	// Send malformed JSON
+	req, _ := http.NewRequest("POST", fmt.Sprintf("http://%s/api/messages/send", srv.Addr()),
+		bytes.NewBufferString(`{not valid json`))
+	req.Header.Set("Authorization", "Bearer "+srv.Token())
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for malformed JSON, got %d", resp.StatusCode)
+	}
+
+	var env Envelope
+	json.NewDecoder(resp.Body).Decode(&env)
+	if env.OK {
+		t.Error("expected ok=false for malformed JSON")
+	}
+}
+
+func TestSendMessageMissingFields(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+
+	srv, _ := setupTestServer(t)
+
+	// Empty content
+	body := `{"channel_id":"aabbccdd","content":""}`
+	req, _ := http.NewRequest("POST", fmt.Sprintf("http://%s/api/messages/send", srv.Addr()),
+		bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+srv.Token())
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for empty content, got %d", resp.StatusCode)
+	}
+
+	// Missing channel_id
+	body2 := `{"content":"hello"}`
+	req2, _ := http.NewRequest("POST", fmt.Sprintf("http://%s/api/messages/send", srv.Addr()),
+		bytes.NewBufferString(body2))
+	req2.Header.Set("Authorization", "Bearer "+srv.Token())
+	req2.Header.Set("Content-Type", "application/json")
+
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != 400 {
+		t.Errorf("expected 400 for missing channel_id, got %d", resp2.StatusCode)
+	}
+}
+
+func TestChannelCreateDuplicateName(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+
+	srv, _ := setupTestServer(t)
+	base := fmt.Sprintf("http://%s", srv.Addr())
+	token := srv.Token()
+
+	// Bootstrap first
+	bsBody := `{"platform":"slack","workspace_domain":"test.slack.com"}`
+	bsReq, _ := http.NewRequest("POST", base+"/api/bootstrap",
+		bytes.NewBufferString(bsBody))
+	bsReq.Header.Set("Authorization", "Bearer "+token)
+	bsReq.Header.Set("Content-Type", "application/json")
+	bsResp, _ := http.DefaultClient.Do(bsReq)
+	bsResp.Body.Close()
+
+	// Create a channel
+	chBody := `{"name":"dup-test-channel","description":"test","type":"public"}`
+	req, _ := http.NewRequest("POST", base+"/api/channels/create",
+		bytes.NewBufferString(chBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("first create should succeed, got %d", resp.StatusCode)
+	}
+
+	// Try to create same channel again
+	req2, _ := http.NewRequest("POST", base+"/api/channels/create",
+		bytes.NewBufferString(chBody))
+	req2.Header.Set("Authorization", "Bearer "+token)
+	req2.Header.Set("Content-Type", "application/json")
+
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != 409 {
+		t.Errorf("expected 409 for duplicate channel name, got %d", resp2.StatusCode)
+	}
+
+	var env Envelope
+	json.NewDecoder(resp2.Body).Decode(&env)
+	if env.OK {
+		t.Error("expected ok=false for duplicate channel name")
 	}
 }
 

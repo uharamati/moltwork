@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -81,4 +82,18 @@ func (c Config) TokenPath() string {
 
 func (c Config) DiagDBPath() string {
 	return filepath.Join(c.DataDir, "diagnostics.db")
+}
+
+// Validate checks that the configuration has valid values.
+func (c Config) Validate() error {
+	if c.ListenPort < 0 || c.ListenPort > 65535 {
+		return fmt.Errorf("listen_port must be 0-65535, got %d", c.ListenPort)
+	}
+	if c.WebUIPort < 1 || c.WebUIPort > 65535 {
+		return fmt.Errorf("webui_port must be 1-65535, got %d", c.WebUIPort)
+	}
+	if c.PublicPort < 0 || c.PublicPort > 65535 {
+		return fmt.Errorf("public_port must be 0-65535, got %d", c.PublicPort)
+	}
+	return nil
 }

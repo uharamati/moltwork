@@ -59,7 +59,10 @@ func FormatGossipAddress(agentName string, addr GossipAddress) string {
 		PubKey:    base64.StdEncoding.EncodeToString(addr.PublicKey),
 		Timestamp: addr.Timestamp,
 	}
-	jsonBytes, _ := json.Marshal(data)
+	jsonBytes, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Sprintf("error: failed to marshal gossip address: %s", err.Error())
+	}
 	return fmt.Sprintf("*%s* is online in Moltwork\n```%s\n%s\n```",
 		agentName, TagRendezvous, string(jsonBytes))
 }
@@ -73,7 +76,10 @@ func FormatJoinRequest(req JoinRequest) string {
 		AgentName:       req.AgentName,
 		Timestamp:       req.Timestamp,
 	}
-	jsonBytes, _ := json.Marshal(data)
+	jsonBytes, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Sprintf("error: failed to marshal join request: %s", err.Error())
+	}
 	return fmt.Sprintf("*%s* (Slack user <@%s>) is requesting to join Moltwork\n```%s\n%s\n```",
 		req.AgentName, req.SlackUserID, TagJoinRequest, string(jsonBytes))
 }
@@ -85,7 +91,10 @@ func FormatJoinResponse(agentName string, resp JoinResponse) string {
 		EncryptedPSK: base64.StdEncoding.EncodeToString(resp.EncryptedPSK),
 		ResponderKey: base64.StdEncoding.EncodeToString(resp.ResponderKey),
 	}
-	jsonBytes, _ := json.Marshal(data)
+	jsonBytes, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Sprintf("error: failed to marshal join response: %s", err.Error())
+	}
 	return fmt.Sprintf("PSK delivered to *%s*\n```%s\n%s\n```",
 		agentName, TagJoinResponse, string(jsonBytes))
 }
@@ -96,7 +105,10 @@ func FormatClaim(claimerKey []byte) string {
 		Type:       "claim",
 		ClaimerKey: base64.StdEncoding.EncodeToString(claimerKey),
 	}
-	jsonBytes, _ := json.Marshal(data)
+	jsonBytes, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Sprintf("error: failed to marshal claim: %s", err.Error())
+	}
 	return fmt.Sprintf("Handling this join request\n```%s\n%s\n```",
 		TagClaim, string(jsonBytes))
 }

@@ -34,6 +34,12 @@ const (
 	EntryTypeMemberRemove       EntryType = 23
 	EntryTypeTokenStatus        EntryType = 24
 	EntryTypeMessageDelete      EntryType = 25 // tombstone: soft-delete own message
+	EntryTypeMessageEdit        EntryType = 26 // edit own message
+	EntryTypeReaction           EntryType = 27 // reaction to a message
+	EntryTypeChannelPin         EntryType = 28 // pin a message
+	EntryTypeChannelUnpin       EntryType = 29 // unpin a message
+	EntryTypeChannelUpdate      EntryType = 30 // update channel name/description
+	EntryTypeAgentUpdate        EntryType = 31 // update agent profile after registration
 )
 
 // Envelope wraps every log entry. Version is checked first (rule B4).
@@ -124,6 +130,28 @@ type MessageDelete struct {
 	ChannelID   []byte `cbor:"2,keyasint"` // channel the message belongs to
 }
 
+// MessageEdit replaces the content of an existing message.
+// Only the original author can edit their own messages.
+type MessageEdit struct {
+	MessageHash []byte `cbor:"1,keyasint"` // hash of the message to edit
+	ChannelID   []byte `cbor:"2,keyasint"` // channel the message belongs to
+	NewContent  []byte `cbor:"3,keyasint"` // updated content
+}
+
+// Reaction adds or removes an emoji reaction on a message.
+type Reaction struct {
+	MessageHash []byte `cbor:"1,keyasint"` // hash of the message to react to
+	ChannelID   []byte `cbor:"2,keyasint"`
+	Emoji       string `cbor:"3,keyasint"` // emoji string (e.g., "thumbsup", "check")
+	Remove      bool   `cbor:"4,keyasint"` // true to remove the reaction
+}
+
+// ChannelPin pins or unpins a message in a channel.
+type ChannelPin struct {
+	ChannelID   []byte `cbor:"1,keyasint"`
+	MessageHash []byte `cbor:"2,keyasint"`
+}
+
 // KeyRotationPending signals group key rotation is starting (rule C7).
 type KeyRotationPending struct {
 	ChannelID []byte `cbor:"1,keyasint"`
@@ -206,11 +234,48 @@ type ChannelArchive struct {
 	ChannelID []byte `cbor:"1,keyasint"`
 }
 
+// ChannelUpdate updates a channel's name and/or description.
+type ChannelUpdate struct {
+	ChannelID   []byte `cbor:"1,keyasint"`
+	Name        string `cbor:"2,keyasint,omitempty"`
+	Description string `cbor:"3,keyasint,omitempty"`
+}
+
+// AgentUpdate updates an agent's profile after registration.
+type AgentUpdate struct {
+	PublicKey   []byte `cbor:"1,keyasint"`
+	DisplayName string `cbor:"2,keyasint,omitempty"`
+	Title       string `cbor:"3,keyasint,omitempty"`
+	Team        string `cbor:"4,keyasint,omitempty"`
+	HumanName   string `cbor:"5,keyasint,omitempty"`
+}
+
 // TokenStatus published when platform token verification changes.
 type TokenStatus struct {
 	Valid     bool   `cbor:"1,keyasint"`
 	Platform string `cbor:"2,keyasint"`
 	Message  string `cbor:"3,keyasint,omitempty"`
+}
+
+// DecodePayload extracts the inner payload bytes from a raw log entry's CBOR data.
+// Entry structure: SignableWrapper { Parents, Envelope bytes, Time }
+// Envelope: { Version, Type, Payload bytes }
+func DecodePayload(rawCBOR []byte) []byte {
+	var sigData struct {
+		Parents  [][]byte `cbor:"1,keyasint"`
+		Envelope []byte   `cbor:"2,keyasint"`
+		Time     int64    `cbor:"3,keyasint"`
+	}
+	if err := Unmarshal(rawCBOR, &sigData); err != nil {
+		return nil
+	}
+
+	var env Envelope
+	if err := Unmarshal(sigData.Envelope, &env); err != nil {
+		return nil
+	}
+
+	return env.Payload
 }
 
 // --- Field Validation (rule B3) ---
@@ -333,6 +398,76 @@ func ValidateRevocation(rev *Revocation) error {
 	}
 	if len(rev.Revokers) != len(rev.Signatures) {
 		return fmt.Errorf("revokers and signatures count mismatch")
+	}
+	return nil
+}
+
+// ValidateMessageEdit checks required fields.
+func ValidateMessageEdit(edit *MessageEdit) error {
+	if len(edit.MessageHash) == 0 {
+		return fmt.Errorf("message hash required")
+	}
+	if len(edit.ChannelID) == 0 {
+		return fmt.Errorf("channel ID required")
+	}
+	if len(edit.NewContent) == 0 {
+		return fmt.Errorf("new content required")
+	}
+	return nil
+}
+
+// ValidateReaction checks required fields.
+func ValidateReaction(r *Reaction) error {
+	if len(r.MessageHash) == 0 {
+		return fmt.Errorf("message hash required")
+	}
+	if len(r.ChannelID) == 0 {
+		return fmt.Errorf("channel ID required")
+	}
+	if r.Emoji == "" {
+		return fmt.Errorf("emoji required")
+	}
+	if len(r.Emoji) > 64 {
+		return fmt.Errorf("emoji string too long (max 64 characters)")
+	}
+	return nil
+}
+
+// ValidateChannelPin checks required fields.
+func ValidateChannelPin(cp *ChannelPin) error {
+	if len(cp.ChannelID) == 0 {
+		return fmt.Errorf("channel ID required")
+	}
+	if len(cp.MessageHash) == 0 {
+		return fmt.Errorf("message hash required")
+	}
+	return nil
+}
+
+// ValidateChannelUpdate checks required fields.
+func ValidateChannelUpdate(cu *ChannelUpdate) error {
+	if len(cu.ChannelID) == 0 {
+		return fmt.Errorf("channel ID required")
+	}
+	if cu.Name == "" && cu.Description == "" {
+		return fmt.Errorf("at least one of name or description required")
+	}
+	if len(cu.Name) > 80 {
+		return fmt.Errorf("channel name must be 80 characters or fewer")
+	}
+	return nil
+}
+
+// ValidateAgentUpdate checks required fields.
+func ValidateAgentUpdate(au *AgentUpdate) error {
+	if len(au.PublicKey) != 32 {
+		return fmt.Errorf("public key must be 32 bytes, got %d", len(au.PublicKey))
+	}
+	if au.DisplayName == "" && au.Title == "" && au.Team == "" && au.HumanName == "" {
+		return fmt.Errorf("at least one field to update is required")
+	}
+	if len(au.DisplayName) > 200 {
+		return fmt.Errorf("display name must be 200 characters or fewer")
 	}
 	return nil
 }

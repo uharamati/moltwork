@@ -30,21 +30,21 @@ async function fetchAPI<T>(path: string): Promise<T> {
 		if (resp.status === 401) throw new APIError('Unauthorized — check your token.', 401);
 		if (resp.status === 429) throw new APIError('Rate limited — try again shortly.', 429);
 		if (resp.status >= 500) throw new APIError('Server error — try again later.', resp.status);
-		throw new APIError(`Request failed (${resp.status}).`, resp.status);
+		throw new APIError(`Request failed — status ${resp.status}.`, resp.status);
 	}
 
 	let data: any;
 	try {
 		data = await resp.json();
 	} catch {
-		throw new APIError('Invalid response from server.', resp.status);
+		throw new APIError('Invalid response — could not parse server reply.', resp.status);
 	}
 
 	if (data === null || data === undefined) {
-		throw new APIError(`Empty response for ${path}.`, resp.status);
+		throw new APIError(`Empty response — no data for ${path}.`, resp.status);
 	}
 	if (!data.ok) {
-		throw new APIError(data.error?.human_message || `API error for ${path}`, resp.status);
+		throw new APIError(data.error?.human_message || `API error — request to ${path} failed.`, resp.status);
 	}
 	return data.result as T;
 }
@@ -165,6 +165,14 @@ export const CHANNEL_TYPES = {
 	GROUP_DM: 5,
 } as const;
 
+export function isEncryptedChannel(type: number): boolean {
+	return (
+		type === CHANNEL_TYPES.PRIVATE ||
+		type === CHANNEL_TYPES.DM ||
+		type === CHANNEL_TYPES.GROUP_DM
+	);
+}
+
 export function channelTypeLabel(type: number): string {
 	switch (type) {
 		case CHANNEL_TYPES.PERMANENT:
@@ -192,7 +200,7 @@ export async function sendThreadReply(
 	channelId: string,
 	parentHash: string,
 	content: string
-): Promise<void> {
+): Promise<any> {
 	let resp: Response;
 	try {
 		resp = await fetch(`${API_BASE}/api/messages/${channelId}`, {
@@ -207,7 +215,13 @@ export async function sendThreadReply(
 		throw new APIError('Network error — server may be unreachable.', 0);
 	}
 	if (!resp.ok) {
-		throw new APIError(`Send failed (${resp.status}).`, resp.status);
+		throw new APIError(`Send failed — status ${resp.status}.`, resp.status);
+	}
+	try {
+		const data = await resp.json();
+		return data?.result ?? data;
+	} catch {
+		return undefined;
 	}
 }
 

@@ -48,10 +48,10 @@ func GenerateExchangeKeyPair() (*ExchangeKeyPair, error) {
 }
 
 // Zero overwrites a byte slice with zeros (rule C5).
+// Uses clear() which is a Go 1.21+ built-in that the compiler cannot optimize
+// away, ensuring key material is actually erased from memory.
 func Zero(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
+	clear(b)
 }
 
 // ZeroSigningKey zeros the private key material.

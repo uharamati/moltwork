@@ -57,8 +57,10 @@ func (c *Connector) rotatePairwiseSecrets(maxAge time.Duration) {
 }
 
 // rotatePairwiseWith initiates a pairwise key rotation with a specific peer.
-// Generates new ephemeral X25519 keys, publishes the new public key encrypted
-// to the peer, and derives a new shared secret.
+// Uses our current exchange key (NOT a new one per peer) to avoid breaking
+// pairwise secrets with other peers. The exchange key is stable — only the
+// pairwise shared secret is re-derived using a fresh ephemeral key that is
+// encrypted and sent to the specific peer.
 func (c *Connector) rotatePairwiseWith(peerPubKey []byte) error {
 	c.pairwiseMu.Lock()
 	defer c.pairwiseMu.Unlock()
@@ -69,16 +71,18 @@ func (c *Connector) rotatePairwiseWith(peerPubKey []byte) error {
 		return fmt.Errorf("no existing pairwise secret")
 	}
 
-	// Generate new ephemeral X25519 key pair for this rotation
-	newExchKP, err := crypto.GenerateExchangeKeyPair()
+	// Generate a per-rotation ephemeral X25519 key pair.
+	// This is NOT stored as our global exchange key — it's used only for
+	// deriving the new pairwise secret with THIS specific peer.
+	ephemeralKP, err := crypto.GenerateExchangeKeyPair()
 	if err != nil {
-		return fmt.Errorf("generate exchange key: %w", err)
+		return fmt.Errorf("generate ephemeral key: %w", err)
 	}
 
-	// Encrypt our new exchange public key with the current pairwise secret
+	// Encrypt our ephemeral exchange public key with the current pairwise secret
 	var oldSecretArr [32]byte
 	copy(oldSecretArr[:], oldSecret)
-	sealed, err := crypto.SealForPeer(oldSecretArr, newExchKP.Public[:])
+	sealed, err := crypto.SealForPeer(oldSecretArr, ephemeralKP.Public[:])
 	if err != nil {
 		return fmt.Errorf("seal rotation key: %w", err)
 	}
@@ -103,10 +107,10 @@ func (c *Connector) rotatePairwiseWith(peerPubKey []byte) error {
 		return fmt.Errorf("peer has no exchange key")
 	}
 
-	// Derive new shared secret using our new private key and peer's current public key
+	// Derive new shared secret using the ephemeral private key and peer's current public key
 	var peerExchPub [32]byte
 	copy(peerExchPub[:], peerAgent.ExchangePubKey)
-	newSecret, err := crypto.DerivePairwiseSecret(newExchKP, peerExchPub)
+	newSecret, err := crypto.DerivePairwiseSecret(ephemeralKP, peerExchPub)
 	if err != nil {
 		return fmt.Errorf("derive new secret: %w", err)
 	}
@@ -117,12 +121,13 @@ func (c *Connector) rotatePairwiseWith(peerPubKey []byte) error {
 		return fmt.Errorf("store new secret: %w", err)
 	}
 
-	// Zero old secret (rule C5)
+	// Zero old secret and ephemeral key material (rule C5)
 	crypto.Zero(oldSecret)
+	crypto.Zero(ephemeralKP.Private[:])
 
-	// Update our exchange keys
-	c.exchangeKey = newExchKP
-	c.keyDB.SetExchangeKeys(newExchKP.Public[:], newExchKP.Private[:])
+	// NOTE: We do NOT update c.exchangeKey here. The global exchange key is
+	// stable and shared across all peer relationships. Replacing it per-peer
+	// would desync pairwise secrets with every other peer.
 
 	c.log.Info("pairwise secret rotated", map[string]any{
 		"peer":  fmt.Sprintf("%x", peerPubKey[:8]),

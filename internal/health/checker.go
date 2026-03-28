@@ -144,7 +144,7 @@ func (c *Checker) checkPlatformToken() DimensionResult {
 			Suggestion: "Your Slack token appears to be invalid. You may need to re-authorize.",
 		}
 	}
-	if sinceVerified > interval+(interval/2) {
+	if sinceVerified > interval {
 		return DimensionResult{
 			Status:     Degraded,
 			Detail:     detail,

@@ -296,7 +296,7 @@ func (s *SlackProvider) ClaimJoinRequest(ctx context.Context, requestID string, 
 	var smallestKey []byte
 	for _, reply := range replies {
 		claim := ParseClaim(reply.Text)
-		if claim == nil || len(claim.ClaimerKey) == 0 {
+		if claim == nil || len(claim.ClaimerKey) != 32 {
 			continue
 		}
 		if smallestKey == nil || comparePubKeys(claim.ClaimerKey, smallestKey) < 0 {
