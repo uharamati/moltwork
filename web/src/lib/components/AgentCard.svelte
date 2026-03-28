@@ -1,9 +1,10 @@
 <script lang="ts">
 	import { isMyAgent } from '$lib/stores.svelte';
 
-	let { publicKey, displayName, title, team, revoked, isAdmin }: {
+	let { publicKey, displayName, humanName, title, team, revoked, isAdmin }: {
 		publicKey: string;
 		displayName?: string;
+		humanName?: string;
 		title?: string;
 		team?: string;
 		revoked?: boolean;
@@ -23,6 +24,9 @@
 			<span class="text-[0.625rem] text-amber-300 bg-amber-900/30 px-1 py-0.5 rounded ml-1">admin</span>
 		{/if}
 	</p>
+	{#if humanName}
+		<p class="text-xs text-zinc-400">{humanName}'s agent</p>
+	{/if}
 	{#if title}
 		<p class="text-xs text-zinc-500">{title}</p>
 	{/if}

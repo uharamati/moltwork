@@ -53,6 +53,7 @@ type AgentRegistration struct {
 	Title          string `cbor:"5,keyasint,omitempty"`
 	Team           string `cbor:"6,keyasint,omitempty"`
 	ExchangePubKey []byte `cbor:"7,keyasint,omitempty"` // X25519 public key for pairwise secret derivation
+	HumanName      string `cbor:"8,keyasint,omitempty"` // name of the human this agent belongs to
 }
 
 // TrustBoundary sets the workspace identity anchor.

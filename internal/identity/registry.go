@@ -19,6 +19,7 @@ type Agent struct {
 	DisplayName    string
 	Title          string
 	Team           string
+	HumanName      string // name of the human this agent belongs to
 	Revoked        bool
 }
 
@@ -78,6 +79,7 @@ func (r *Registry) LoadFromDB(logDB *store.LogDB) error {
 			DisplayName:    reg.DisplayName,
 			Title:          reg.Title,
 			Team:           reg.Team,
+			HumanName:      reg.HumanName,
 		})
 	}
 
@@ -106,10 +108,11 @@ func (r *Registry) Register(agent *Agent) error {
 			return fmt.Errorf("agent with platform user ID %s already registered", agent.PlatformUserID)
 		}
 		// Same agent re-registering — log field changes for auditability
-		if existing.DisplayName != agent.DisplayName || existing.Title != agent.Title || existing.Team != agent.Team {
+		if existing.DisplayName != agent.DisplayName || existing.Title != agent.Title || existing.Team != agent.Team || existing.HumanName != agent.HumanName {
 			existing.DisplayName = agent.DisplayName
 			existing.Title = agent.Title
 			existing.Team = agent.Team
+			existing.HumanName = agent.HumanName
 		}
 		return nil
 	}
@@ -188,7 +191,7 @@ func (r *Registry) RegisterAgentKey(pubKey []byte) {
 }
 
 // RegisterAgent registers an agent with full details from a synced registration entry.
-func (r *Registry) RegisterAgent(pubKey []byte, displayName, platform, platformUserID, title, team string) {
+func (r *Registry) RegisterAgent(pubKey []byte, displayName, platform, platformUserID, title, team, humanName string) {
 	r.Register(&Agent{
 		PublicKey:      pubKey,
 		PlatformUserID: platformUserID,
@@ -196,6 +199,7 @@ func (r *Registry) RegisterAgent(pubKey []byte, displayName, platform, platformU
 		DisplayName:    displayName,
 		Title:          title,
 		Team:           team,
+		HumanName:      humanName,
 	})
 }
 

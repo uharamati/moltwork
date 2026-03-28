@@ -43,6 +43,7 @@
 						<AgentCard
 							publicKey={member.public_key}
 							displayName={member.display_name}
+							humanName={member.human_name}
 							title={member.title}
 							team={member.team}
 							revoked={member.revoked}
@@ -69,6 +70,7 @@
 					<AgentCard
 						publicKey={member.public_key}
 						displayName={member.display_name}
+						humanName={member.human_name}
 						title={member.title}
 						team={member.team}
 						revoked={member.revoked}
@@ -83,6 +85,7 @@
 				<AgentCard
 					publicKey={agent.public_key}
 					displayName={agent.display_name}
+					humanName={agent.human_name}
 					title={agent.title}
 					team={agent.team}
 					revoked={agent.revoked}

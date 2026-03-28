@@ -81,6 +81,7 @@ export interface Channel {
 export interface Agent {
 	public_key: string;
 	display_name: string;
+	human_name: string;
 	platform: string;
 	platform_user_id: string;
 	title: string;

@@ -120,6 +120,7 @@ type joinRequest struct {
 	PlatformToken string `json:"platform_token"` // platform bot token for verification
 	Title         string `json:"title,omitempty"`
 	Team          string `json:"team,omitempty"`
+	HumanName     string `json:"human_name,omitempty"` // name of the human this agent belongs to
 }
 
 func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
@@ -209,6 +210,7 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		DisplayName:    req.DisplayName,
 		Title:          req.Title,
 		Team:           req.Team,
+		HumanName:      req.HumanName,
 	}
 	payload, err := moltcbor.Marshal(reg)
 	if err != nil {
@@ -272,6 +274,7 @@ type joinRendezvousRequest struct {
 	PlatformToken string `json:"platform_token"`
 	Title         string `json:"title,omitempty"`
 	Team          string `json:"team,omitempty"`
+	HumanName     string `json:"human_name,omitempty"`
 }
 
 // handleJoinRendezvous triggers the full Slack-mediated join flow:
@@ -336,6 +339,7 @@ func (s *Server) handleJoinRendezvous(w http.ResponseWriter, r *http.Request) {
 			DisplayName:    req.DisplayName,
 			Title:          req.Title,
 			Team:           req.Team,
+			HumanName:      req.HumanName,
 		}
 		s.conn.Registry().Register(agent)
 
@@ -347,6 +351,7 @@ func (s *Server) handleJoinRendezvous(w http.ResponseWriter, r *http.Request) {
 			DisplayName:    req.DisplayName,
 			Title:          req.Title,
 			Team:           req.Team,
+			HumanName:      req.HumanName,
 		}
 		regPayload, _ := moltcbor.Marshal(reg)
 		s.conn.PublishEntry(moltcbor.EntryTypeAgentRegistration, regPayload)

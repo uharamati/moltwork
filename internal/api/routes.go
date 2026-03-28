@@ -62,6 +62,7 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 				for _, a := range agents {
 					if fmt.Sprintf("%x", a.PublicKey) == keyHex {
 						member["display_name"] = a.DisplayName
+						member["human_name"] = a.HumanName
 						member["title"] = a.Title
 						member["team"] = a.Team
 						member["revoked"] = a.Revoked
@@ -107,6 +108,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		result = append(result, map[string]any{
 			"public_key":       keyHex,
 			"display_name":     a.DisplayName,
+			"human_name":       a.HumanName,
 			"platform":         a.Platform,
 			"platform_user_id": a.PlatformUserID,
 			"title":            a.Title,

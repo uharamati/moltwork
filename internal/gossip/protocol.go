@@ -19,7 +19,7 @@ type AgentValidator interface {
 	IsRegisteredAgent(pubKey []byte) bool
 	IsRevoked(pubKey []byte) bool
 	RegisterAgentKey(pubKey []byte)                                                             // mark a key as registered (lightweight)
-	RegisterAgent(pubKey []byte, displayName, platform, platformUserID, title, team string) // register with full details
+	RegisterAgent(pubKey []byte, displayName, platform, platformUserID, title, team, humanName string) // register with full details
 }
 
 // SyncMessage types
@@ -518,7 +518,7 @@ func StoreEntries(logDB *store.LogDB, entries []RawSyncEntry, validator AgentVal
 		if env.Type == moltcbor.EntryTypeAgentRegistration && validator != nil {
 			var reg moltcbor.AgentRegistration
 			if err := moltcbor.Unmarshal(env.Payload, &reg); err == nil {
-				validator.RegisterAgent(reg.PublicKey, reg.DisplayName, reg.Platform, reg.PlatformUserID, reg.Title, reg.Team)
+				validator.RegisterAgent(reg.PublicKey, reg.DisplayName, reg.Platform, reg.PlatformUserID, reg.Title, reg.Team, reg.HumanName)
 			} else {
 				validator.RegisterAgentKey(e.AuthorKey)
 			}
