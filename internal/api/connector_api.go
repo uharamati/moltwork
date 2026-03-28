@@ -196,10 +196,25 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		DisplayName:    req.DisplayName,
 		Title:          req.Title,
 		Team:           req.Team,
+		HumanName:      req.HumanName,
 	}
 	if err := s.conn.Registry().Register(agent); err != nil {
-		writeError(w, r, merrors.OnboardingDuplicatePlatformID(), 409)
-		return
+		// Sybil check failed — same platform_user_id with different key.
+		// If we have a verified platform token, this is a legitimate key migration
+		// (e.g., agent reinstalled with new keys). Replace the old registration.
+		if platformUserID != "" && req.PlatformToken != "" {
+			oldKey := s.conn.Registry().ReplaceAgent(agent)
+			if oldKey != nil {
+				s.log.Info("agent key migration: replaced old key", map[string]any{
+					"platform_user_id": platformUserID,
+					"old_key":          fmt.Sprintf("%x", oldKey[:8]),
+					"new_key":          fmt.Sprintf("%x", kp.Public[:8]),
+				})
+			}
+		} else {
+			writeError(w, r, merrors.OnboardingDuplicatePlatformID(), 409)
+			return
+		}
 	}
 
 	// Publish registration entry to the DAG via publishEntry (rate limited + atomic)
@@ -342,7 +357,17 @@ func (s *Server) handleJoinRendezvous(w http.ResponseWriter, r *http.Request) {
 			Team:           req.Team,
 			HumanName:      req.HumanName,
 		}
-		s.conn.Registry().Register(agent)
+		if err := s.conn.Registry().Register(agent); err != nil {
+			// Platform-verified key migration — replace old key
+			oldKey := s.conn.Registry().ReplaceAgent(agent)
+			if oldKey != nil {
+				s.conn.Log().Info("agent key migration via rendezvous", map[string]any{
+					"platform_user_id": platformID.UserID,
+					"old_key":          fmt.Sprintf("%x", oldKey[:8]),
+					"new_key":          fmt.Sprintf("%x", kp.Public[:8]),
+				})
+			}
+		}
 
 		reg := moltcbor.AgentRegistration{
 			PublicKey:      kp.Public,

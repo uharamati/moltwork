@@ -79,7 +79,7 @@ func (r *Registry) LoadFromDB(logDB *store.LogDB) error {
 			continue
 		}
 
-		r.Register(&Agent{
+		agent := &Agent{
 			PublicKey:      reg.PublicKey,
 			ExchangePubKey: reg.ExchangePubKey,
 			PlatformUserID: reg.PlatformUserID,
@@ -88,7 +88,12 @@ func (r *Registry) LoadFromDB(logDB *store.LogDB) error {
 			Title:          reg.Title,
 			Team:           reg.Team,
 			HumanName:      reg.HumanName,
-		})
+		}
+		if err := r.Register(agent); err != nil {
+			// Sybil conflict — later entry supersedes earlier one (key migration).
+			// Entries are sorted by timestamp, so the newer registration wins.
+			r.ReplaceAgent(agent)
+		}
 	}
 
 	return nil
@@ -115,7 +120,7 @@ func (r *Registry) Register(agent *Agent) error {
 		if !crypto.ConstantTimeEqual(existing.PublicKey, agent.PublicKey) {
 			return fmt.Errorf("agent with platform user ID %s already registered", agent.PlatformUserID)
 		}
-		// Same agent re-registering — log field changes for auditability
+		// Same agent re-registering — update fields
 		if existing.DisplayName != agent.DisplayName || existing.Title != agent.Title || existing.Team != agent.Team || existing.HumanName != agent.HumanName {
 			existing.DisplayName = agent.DisplayName
 			existing.Title = agent.Title
@@ -129,6 +134,33 @@ func (r *Registry) Register(agent *Agent) error {
 	r.byKey[keyStr] = agent
 	r.byPlat[platKey] = agent
 	return nil
+}
+
+// ReplaceAgent performs a platform-verified key migration. The old agent with the same
+// platform_user_id is marked as superseded and removed from the registry, and the new
+// agent takes its place. This is only safe to call when the caller has verified the
+// platform token (proving ownership of the platform identity).
+func (r *Registry) ReplaceAgent(newAgent *Agent) (oldPubKey []byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	platKey := platformKey(newAgent.Platform, newAgent.PlatformUserID)
+
+	// Find and remove the old agent
+	if existing, ok := r.byPlat[platKey]; ok {
+		oldKey := make([]byte, len(existing.PublicKey))
+		copy(oldKey, existing.PublicKey)
+		oldKeyStr := fmt.Sprintf("%x", existing.PublicKey)
+		delete(r.byKey, oldKeyStr)
+		delete(r.byPlat, platKey)
+		oldPubKey = oldKey
+	}
+
+	// Register the new agent
+	keyStr := fmt.Sprintf("%x", newAgent.PublicKey)
+	r.byKey[keyStr] = newAgent
+	r.byPlat[platKey] = newAgent
+	return oldPubKey
 }
 
 // GetByPublicKey looks up an agent by their Ed25519 public key.
