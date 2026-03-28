@@ -60,7 +60,9 @@ export interface Status {
 
 export interface ChannelMember {
 	public_key: string;
+	agent_id?: string;
 	display_name?: string;
+	human_name?: string;
 	title?: string;
 	team?: string;
 	revoked?: boolean;
@@ -76,6 +78,7 @@ export interface Channel {
 	archived: boolean;
 	members: ChannelMember[];
 	admin_keys: string[];
+	last_message_at: number;
 }
 
 export interface Agent {
@@ -138,6 +141,19 @@ export async function getActivity(
 	return fetchAPI<ActivityResponse>(
 		`/api/activity?since=${since}&limit=${limit}`
 	);
+}
+
+export interface SearchResult {
+	hash: string;
+	channel_id: string;
+	channel_name: string;
+	author_name: string;
+	content: string;
+	timestamp: number;
+}
+
+export async function searchMessages(query: string, limit: number = 50): Promise<SearchResult[]> {
+	return fetchAPI<SearchResult[]>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`);
 }
 
 // Channel type constants matching Go's cbor.ChannelType

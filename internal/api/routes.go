@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 
 	moltcbor "moltwork/internal/cbor"
 	"moltwork/internal/identity"
@@ -16,6 +18,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/channels", s.handleChannels)
 	mux.HandleFunc("GET /api/agents", s.handleAgents)
 	mux.HandleFunc("GET /api/agents/{id}", s.handleAgentDetail)
+	mux.HandleFunc("GET /api/search", s.handleSearch)
 	mux.HandleFunc("GET /api/org/relationships", s.handleGetOrgRelationships)
 	mux.HandleFunc("GET /api/attestations", s.handleGetAttestations)
 	mux.HandleFunc("GET /api/attestations/{agent_id}", s.handleGetAgentAttestations)
@@ -81,15 +84,27 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 			adminKeys = append(adminKeys, keyHex)
 		}
 
+		// Get last message timestamp for this channel
+		lastMsgAt := int64(0)
+		if msgs, err := s.conn.GetMessages(fmt.Sprintf("%x", ch.ID), 0, 1); err == nil && len(msgs) > 0 {
+			// Messages are sorted by time — last one has the latest timestamp
+			for _, m := range msgs {
+				if m.Timestamp > lastMsgAt {
+					lastMsgAt = m.Timestamp
+				}
+			}
+		}
+
 		result = append(result, map[string]any{
-			"id":           fmt.Sprintf("%x", ch.ID),
-			"name":         ch.Name,
-			"description":  ch.Description,
-			"type":         ch.Type,
-			"member_count": ch.MemberCount(),
-			"archived":     ch.Archived,
-			"members":      members,
-			"admin_keys":   adminKeys,
+			"id":              fmt.Sprintf("%x", ch.ID),
+			"name":            ch.Name,
+			"description":     ch.Description,
+			"type":            ch.Type,
+			"member_count":    ch.MemberCount(),
+			"archived":        ch.Archived,
+			"members":         members,
+			"admin_keys":      adminKeys,
+			"last_message_at": lastMsgAt,
 		})
 	}
 
@@ -323,4 +338,54 @@ func decodePayloadFromRaw(raw *store.RawEntry) []byte {
 func writeJSON(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+// --- Search ---
+
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+	if query == "" || len(query) < 2 {
+		writeError(w, r, fmt.Errorf("search query must be at least 2 characters"), 400)
+		return
+	}
+	if len(query) > 200 {
+		writeError(w, r, fmt.Errorf("search query too long"), 400)
+		return
+	}
+
+	limit := 50
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 && v <= 200 {
+			limit = v
+		}
+	}
+
+	// Search across all activity
+	allMsgs, err := s.conn.GetNewActivity(0, 10000)
+	if err != nil {
+		writeError(w, r, err, 500)
+		return
+	}
+
+	queryLower := strings.ToLower(query)
+	var results []map[string]any
+	for _, m := range allMsgs {
+		if strings.Contains(strings.ToLower(m.Content), queryLower) ||
+			strings.Contains(strings.ToLower(m.AuthorName), queryLower) ||
+			strings.Contains(strings.ToLower(m.ChannelName), queryLower) {
+			results = append(results, map[string]any{
+				"hash":         m.Hash,
+				"channel_id":   m.ChannelID,
+				"channel_name": m.ChannelName,
+				"author_name":  m.AuthorName,
+				"content":      m.Content,
+				"timestamp":    m.Timestamp,
+			})
+			if len(results) >= limit {
+				break
+			}
+		}
+	}
+
+	writeSuccess(w, r, results)
 }

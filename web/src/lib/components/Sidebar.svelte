@@ -8,9 +8,45 @@
 		groupChannels,
 		myAgentActiveIn,
 		logout,
+		formatTimestamp,
 	} from '$lib/stores.svelte';
 
 	const store = getStore();
+
+	// Track last-read timestamps per channel in localStorage
+	function getLastRead(channelId: string): number {
+		try {
+			return parseInt(localStorage.getItem(`mw_read_${channelId}`) || '0', 10) || 0;
+		} catch { return 0; }
+	}
+
+	function markRead(channelId: string, timestamp: number) {
+		try {
+			localStorage.setItem(`mw_read_${channelId}`, String(timestamp));
+		} catch {}
+	}
+
+	function hasUnread(ch: any): boolean {
+		if (!ch.last_message_at) return false;
+		return ch.last_message_at > getLastRead(ch.id);
+	}
+
+	function handleSelectChannel(ch: any) {
+		if (ch.last_message_at) {
+			markRead(ch.id, ch.last_message_at);
+		}
+		selectChannel(ch);
+	}
+
+	function timeAgo(ts: number): string {
+		if (!ts) return '';
+		const now = Math.floor(Date.now() / 1000);
+		const diff = now - ts;
+		if (diff < 60) return 'now';
+		if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+		if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+		return `${Math.floor(diff / 86400)}d`;
+	}
 </script>
 
 <div class="w-64 min-w-64 border-r border-zinc-800 flex flex-col">
@@ -44,8 +80,8 @@
 			</p>
 			{#each group.channels as ch}
 				<button
-					onclick={() => selectChannel(ch)}
-					class="w-full text-left px-3 py-1.5 rounded text-sm transition-colors flex items-center gap-1 {store.currentView === 'channel' && store.selectedChannel?.id === ch.id ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-900'}"
+					onclick={() => handleSelectChannel(ch)}
+					class="w-full text-left px-3 py-1.5 rounded text-sm transition-colors flex items-center gap-1 {store.currentView === 'channel' && store.selectedChannel?.id === ch.id ? 'bg-zinc-800 text-zinc-100' : hasUnread(ch) ? 'text-zinc-200 font-medium' : 'text-zinc-400 hover:bg-zinc-900'}"
 				>
 					{#if ch.type === 3 || ch.type === 4 || ch.type === 5}
 						<svg class="w-3.5 h-3.5 text-zinc-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
@@ -53,9 +89,17 @@
 						<span class="text-zinc-600">#</span>
 					{/if}
 					<span class="flex-1 truncate">{ch.name || channelTypeLabel(ch.type)}</span>
-					{#if myAgentActiveIn(ch)}
+					{#if ch.last_message_at}
+						<span class="text-[0.6rem] text-zinc-600 flex-shrink-0">{timeAgo(ch.last_message_at)}</span>
+					{/if}
+					{#if hasUnread(ch)}
 						<span
-							class="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0"
+							class="w-2 h-2 rounded-full bg-blue-400 flex-shrink-0"
+							title="New messages"
+						></span>
+					{:else if myAgentActiveIn(ch)}
+						<span
+							class="w-1.5 h-1.5 rounded-full bg-emerald-400/50 flex-shrink-0"
 							title="Your agent is a member"
 						></span>
 					{/if}
@@ -70,12 +114,5 @@
 			<p>{store.status.agent_count} agents / {store.status.entry_count} entries</p>
 			<p>{store.status.peer_count ?? 0} peers connected</p>
 		{/if}
-		<button
-			onclick={logout}
-			class="w-full mt-2 px-2 py-1 text-zinc-600 hover:text-zinc-400 hover:bg-zinc-900 rounded text-xs transition-colors text-left"
-			aria-label="Disconnect and log out"
-		>
-			Disconnect
-		</button>
 	</div>
 </div>
