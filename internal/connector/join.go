@@ -213,7 +213,8 @@ func (c *Connector) JoinExisting(ctx context.Context, rv rendezvous.Provider, pl
 }
 
 // PostRendezvousAddress posts this node's gossip address to the rendezvous channel.
-// Called after bootstrap and on address changes.
+// Called after bootstrap and on address changes. Idempotent: skips posting if the
+// multiaddr is unchanged and was posted within the last 24 hours (BUG-1 fix).
 func (c *Connector) PostRendezvousAddress(ctx context.Context, rv rendezvous.Provider) error {
 	if c.node == nil {
 		return fmt.Errorf("gossip node not started")
@@ -222,6 +223,17 @@ func (c *Connector) PostRendezvousAddress(ctx context.Context, rv rendezvous.Pro
 	advertiseAddr := c.determineAdvertiseAddr()
 	if advertiseAddr == "" {
 		c.log.Warn("could not determine advertise address, skipping rendezvous post")
+		return nil
+	}
+
+	// Dedup check: skip if same multiaddr was posted within the last 24 hours
+	const repostInterval = 24 * time.Hour
+	lastAddr, lastPosted := c.keyDB.GetRendezvousPost()
+	if lastAddr == advertiseAddr && time.Since(time.Unix(lastPosted, 0)) < repostInterval {
+		c.log.Debug("skipping rendezvous post, multiaddr unchanged and recent", map[string]any{
+			"multiaddr":   advertiseAddr,
+			"last_posted": time.Unix(lastPosted, 0).Format(time.RFC3339),
+		})
 		return nil
 	}
 
@@ -241,6 +253,11 @@ func (c *Connector) PostRendezvousAddress(ctx context.Context, rv rendezvous.Pro
 
 	if err := rv.PostGossipAddress(ctx, addr); err != nil {
 		return fmt.Errorf("post gossip address: %w", err)
+	}
+
+	// Record the post so future calls can dedup
+	if err := c.keyDB.SetRendezvousPost(advertiseAddr, time.Now().Unix()); err != nil {
+		c.log.Warn("could not persist rendezvous post record", map[string]any{"error": err.Error()})
 	}
 
 	c.log.Info("posted rendezvous address", map[string]any{

@@ -176,6 +176,15 @@ func (s *KeyDB) migrate() error {
 		return fmt.Errorf("create revocation_proposals: %w", err)
 	}
 
+	// Rendezvous post dedup — prevents announcement spam across restarts (BUG-1)
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS rendezvous_post (
+		id         INTEGER PRIMARY KEY CHECK (id = 1),
+		multiaddr  TEXT NOT NULL,
+		posted_at  INTEGER NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("create rendezvous_post: %w", err)
+	}
+
 	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS revocation_signatures (
 		proposal_id TEXT NOT NULL,
 		signer_key TEXT NOT NULL,
@@ -347,6 +356,24 @@ func (s *KeyDB) GetRendezvousChannelID() string {
 		return ""
 	}
 	return id
+}
+
+// SetRendezvousPost records the last posted rendezvous multiaddr and timestamp.
+func (s *KeyDB) SetRendezvousPost(multiaddr string, postedAt int64) error {
+	_, err := s.db.Exec(
+		"INSERT OR REPLACE INTO rendezvous_post (id, multiaddr, posted_at) VALUES (1, ?, ?)",
+		multiaddr, postedAt,
+	)
+	return err
+}
+
+// GetRendezvousPost returns the last posted multiaddr and timestamp, or ("", 0).
+func (s *KeyDB) GetRendezvousPost() (multiaddr string, postedAt int64) {
+	err := s.db.QueryRow("SELECT multiaddr, posted_at FROM rendezvous_post WHERE id = 1").Scan(&multiaddr, &postedAt)
+	if err != nil {
+		return "", 0
+	}
+	return multiaddr, postedAt
 }
 
 // --- Read Receipts ---
