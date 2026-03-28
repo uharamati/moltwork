@@ -51,9 +51,46 @@ type Connector struct {
 	displayName          string // agent's display name, set during join
 	cachedPlatformUserID string // cached to avoid O(n) scan every call
 
+	// Subscriber notification: broadcast when new entries arrive via gossip or local publish.
+	// API handlers (SSE, long-polling) subscribe to get notified of new data.
+	subMu       sync.Mutex
+	subscribers map[chan struct{}]struct{}
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+}
+
+// Subscribe returns a channel that receives a signal when new entries are available.
+// Call Unsubscribe when done to avoid leaks.
+func (c *Connector) Subscribe() chan struct{} {
+	ch := make(chan struct{}, 1)
+	c.subMu.Lock()
+	if c.subscribers == nil {
+		c.subscribers = make(map[chan struct{}]struct{})
+	}
+	c.subscribers[ch] = struct{}{}
+	c.subMu.Unlock()
+	return ch
+}
+
+// Unsubscribe removes a subscriber channel.
+func (c *Connector) Unsubscribe(ch chan struct{}) {
+	c.subMu.Lock()
+	delete(c.subscribers, ch)
+	c.subMu.Unlock()
+}
+
+// notifySubscribers sends a non-blocking signal to all subscribers.
+func (c *Connector) notifySubscribers() {
+	c.subMu.Lock()
+	for ch := range c.subscribers {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+	c.subMu.Unlock()
 }
 
 // New creates a new Connector but does not start it.
@@ -193,6 +230,7 @@ func (c *Connector) Start(ctx context.Context) error {
 				c.replayOrgRelationships()
 				c.EstablishPairwiseSecrets()
 				c.replayGroupKeyDistributes()
+				c.notifySubscribers()
 			}
 		}
 	}()

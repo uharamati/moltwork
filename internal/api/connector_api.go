@@ -32,6 +32,7 @@ func (s *Server) registerConnectorRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/dm/send", s.handleSendDM)
 	mux.HandleFunc("GET /api/messages/{channel_id}", s.handleGetMessages)
 	mux.HandleFunc("GET /api/activity", s.handleGetActivity)
+	mux.HandleFunc("GET /api/events", s.handleSSE)
 
 	// --- Threads ---
 	mux.HandleFunc("POST /api/threads/reply", s.handleSendThreadReply)
@@ -590,12 +591,18 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 	writeSuccess(w, r, messages)
 }
 
-// --- Get Activity (poll for new messages across all channels) ---
+// --- Get Activity (poll or long-poll for new messages across all channels) ---
+//
+// Query params:
+//   - since: unix timestamp, return messages after this time
+//   - limit: max messages to return (default 200, max 1000)
+//   - wait:  long-poll timeout in seconds (0-60, default 0 = no wait)
+//            If set, blocks until new data arrives or timeout expires.
 
 func (s *Server) handleGetActivity(w http.ResponseWriter, r *http.Request) {
 	since := int64(0)
-	if s := r.URL.Query().Get("since"); s != "" {
-		if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+	if sv := r.URL.Query().Get("since"); sv != "" {
+		if v, err := strconv.ParseInt(sv, 10, 64); err == nil {
 			since = v
 		}
 	}
@@ -607,19 +614,127 @@ func (s *Server) handleGetActivity(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	waitSec := 0
+	if ws := r.URL.Query().Get("wait"); ws != "" {
+		if v, err := strconv.Atoi(ws); err == nil && v > 0 && v <= 60 {
+			waitSec = v
+		}
+	}
+
+	// First check: do we have data already?
 	messages, err := s.conn.GetNewActivity(since, limit)
 	if err != nil {
 		writeError(w, r, err, 500)
 		return
 	}
 
-	// Include the latest timestamp so the agent can use it for next poll
-	latestTs, _ := s.conn.LogDB().LatestTimestamp()
+	// If we have messages or no wait requested, return immediately
+	if len(messages) > 0 || waitSec == 0 {
+		latestTs, _ := s.conn.LogDB().LatestTimestamp()
+		writeSuccess(w, r, map[string]any{
+			"messages":         messages,
+			"latest_timestamp": latestTs,
+		})
+		return
+	}
 
+	// Long-poll: wait for new data or timeout
+	sub := s.conn.Subscribe()
+	defer s.conn.Unsubscribe(sub)
+
+	timer := time.NewTimer(time.Duration(waitSec) * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-sub:
+		// New data arrived — fetch and return
+	case <-timer.C:
+		// Timeout — return empty
+	case <-r.Context().Done():
+		// Client disconnected
+		return
+	}
+
+	messages, err = s.conn.GetNewActivity(since, limit)
+	if err != nil {
+		writeError(w, r, err, 500)
+		return
+	}
+	latestTs, _ := s.conn.LogDB().LatestTimestamp()
 	writeSuccess(w, r, map[string]any{
 		"messages":         messages,
 		"latest_timestamp": latestTs,
 	})
+}
+
+// --- Server-Sent Events (SSE) ---
+//
+// GET /api/events?since={timestamp}
+// Streams new activity as SSE events. Each event contains the same payload
+// as /api/activity. The connection stays open until the client disconnects.
+
+func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	since := int64(0)
+	if sv := r.URL.Query().Get("since"); sv != "" {
+		if v, err := strconv.ParseInt(sv, 10, 64); err == nil {
+			since = v
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // disable nginx buffering
+	flusher.Flush()
+
+	sub := s.conn.Subscribe()
+	defer s.conn.Unsubscribe(sub)
+
+	// Send initial data
+	s.sendSSEActivity(w, flusher, &since, 200)
+
+	// Keep-alive ticker to detect dead connections
+	keepAlive := time.NewTicker(15 * time.Second)
+	defer keepAlive.Stop()
+
+	for {
+		select {
+		case <-sub:
+			s.sendSSEActivity(w, flusher, &since, 200)
+		case <-keepAlive.C:
+			fmt.Fprintf(w, ": keepalive\n\n")
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func (s *Server) sendSSEActivity(w http.ResponseWriter, flusher http.Flusher, since *int64, limit int) {
+	messages, err := s.conn.GetNewActivity(*since, limit)
+	if err != nil || len(messages) == 0 {
+		return
+	}
+
+	latestTs, _ := s.conn.LogDB().LatestTimestamp()
+	*since = latestTs
+
+	data, err := json.Marshal(map[string]any{
+		"messages":         messages,
+		"latest_timestamp": latestTs,
+	})
+	if err != nil {
+		return
+	}
+
+	fmt.Fprintf(w, "event: activity\ndata: %s\n\n", data)
+	flusher.Flush()
 }
 
 // --- Create Channel ---

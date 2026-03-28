@@ -80,8 +80,12 @@ func (c *Connector) publishEntry(entryType moltcbor.EntryType, payload []byte) e
 		return fmt.Errorf("insert entry: %w", err)
 	}
 
-	return c.logDB.InsertEntry(entry.Hash[:], entry.RawCBOR, entry.AuthorKey, entry.Signature,
-		int(entryType), entry.CreatedAt, hashesToSlices(entry.Parents))
+	if err := c.logDB.InsertEntry(entry.Hash[:], entry.RawCBOR, entry.AuthorKey, entry.Signature,
+		int(entryType), entry.CreatedAt, hashesToSlices(entry.Parents)); err != nil {
+		return err
+	}
+	c.notifySubscribers()
+	return nil
 }
 
 // checkRateLimit enforces the local rate limit.
