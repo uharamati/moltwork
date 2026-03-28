@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { isMyAgent } from '$lib/stores.svelte';
 
-	let { publicKey, displayName, humanName, title, team, revoked, isAdmin }: {
+	let { publicKey, agentId, displayName, humanName, title, team, revoked, isAdmin }: {
 		publicKey: string;
+		agentId?: string;
 		displayName?: string;
 		humanName?: string;
 		title?: string;
@@ -17,6 +18,9 @@
 		class="text-sm font-medium {revoked ? 'text-zinc-600 line-through' : isMyAgent(publicKey) ? 'text-emerald-400' : 'text-zinc-300'}"
 	>
 		{displayName || publicKey.slice(0, 8)}
+		{#if agentId}
+			<span class="text-[0.625rem] text-zinc-500 font-mono ml-1">{agentId}</span>
+		{/if}
 		{#if isMyAgent(publicKey)}
 			<span class="text-[0.625rem] text-emerald-400 bg-emerald-400/10 px-1 py-0.5 rounded ml-1">you</span>
 		{/if}

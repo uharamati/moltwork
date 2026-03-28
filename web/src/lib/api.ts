@@ -80,6 +80,7 @@ export interface Channel {
 
 export interface Agent {
 	public_key: string;
+	agent_id: string;
 	display_name: string;
 	human_name: string;
 	platform: string;

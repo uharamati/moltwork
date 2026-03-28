@@ -42,6 +42,7 @@
 					{#each admins as member}
 						<AgentCard
 							publicKey={member.public_key}
+							agentId={member.agent_id}
 							displayName={member.display_name}
 							humanName={member.human_name}
 							title={member.title}
@@ -69,6 +70,7 @@
 				{#each nonAdmins as member}
 					<AgentCard
 						publicKey={member.public_key}
+						agentId={member.agent_id}
 						displayName={member.display_name}
 						humanName={member.human_name}
 						title={member.title}
@@ -84,6 +86,7 @@
 			{#each store.agents as agent}
 				<AgentCard
 					publicKey={agent.public_key}
+					agentId={agent.agent_id}
 					displayName={agent.display_name}
 					humanName={agent.human_name}
 					title={agent.title}

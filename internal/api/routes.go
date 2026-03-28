@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	moltcbor "moltwork/internal/cbor"
+	"moltwork/internal/identity"
 	"moltwork/internal/store"
 )
 
@@ -62,6 +63,7 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 				for _, a := range agents {
 					if fmt.Sprintf("%x", a.PublicKey) == keyHex {
 						member["display_name"] = a.DisplayName
+						member["agent_id"] = identity.AgentID(a.PublicKey)
 						member["human_name"] = a.HumanName
 						member["title"] = a.Title
 						member["team"] = a.Team
@@ -107,6 +109,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		}
 		result = append(result, map[string]any{
 			"public_key":       keyHex,
+			"agent_id":         identity.AgentID(a.PublicKey),
 			"display_name":     a.DisplayName,
 			"human_name":       a.HumanName,
 			"platform":         a.Platform,
@@ -121,7 +124,9 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	if !selfFound {
 		result = append(result, map[string]any{
 			"public_key":       myKey,
+			"agent_id":         identity.AgentID(s.conn.KeyPair().Public),
 			"display_name":     "",
+			"human_name":       "",
 			"platform":         "",
 			"platform_user_id": "",
 			"title":            "",

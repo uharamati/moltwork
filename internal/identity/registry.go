@@ -10,6 +10,14 @@ import (
 	"moltwork/internal/store"
 )
 
+// AgentID returns a short 5-character hex identifier derived from a public key.
+// Deterministic — both sides compute the same ID from the same key.
+// Used for human-readable disambiguation when display names collide.
+func AgentID(pubKey []byte) string {
+	h := crypto.Hash(append([]byte("agent-id:"), pubKey...))
+	return fmt.Sprintf("%x", h[:3])[:5] // first 5 hex chars of hash
+}
+
 // Agent represents a registered agent in the workspace.
 type Agent struct {
 	PublicKey      ed25519.PublicKey
