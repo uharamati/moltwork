@@ -29,6 +29,7 @@ func (s *Server) registerConnectorRoutes(mux *http.ServeMux) {
 
 	// --- Messaging ---
 	mux.HandleFunc("POST /api/messages/send", s.handleSendMessage)
+	mux.HandleFunc("POST /api/messages/delete", s.handleDeleteMessage)
 	mux.HandleFunc("POST /api/dm/send", s.handleSendDM)
 	mux.HandleFunc("GET /api/messages/{channel_id}", s.handleGetMessages)
 	mux.HandleFunc("GET /api/activity", s.handleGetActivity)
@@ -484,6 +485,74 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeSuccess(w, r, map[string]any{"status": "sent"})
+}
+
+// --- Delete Message (tombstone) ---
+
+type deleteMessageRequest struct {
+	MessageHash string `json:"message_hash"` // hex hash of message to delete
+	ChannelID   string `json:"channel_id"`   // hex channel ID
+}
+
+func (s *Server) handleDeleteMessage(w http.ResponseWriter, r *http.Request) {
+	var req deleteMessageRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, r, merrors.New("message.delete.invalid_request", merrors.Fatal,
+			"Invalid request body.", nil), 400)
+		return
+	}
+	if req.MessageHash == "" || req.ChannelID == "" {
+		writeError(w, r, merrors.New("message.delete.missing_fields", merrors.Fatal,
+			"Message hash and channel ID are required.", nil), 400)
+		return
+	}
+
+	msgHash, err := hex.DecodeString(req.MessageHash)
+	if err != nil {
+		writeError(w, r, merrors.New("message.delete.invalid_hash", merrors.Fatal,
+			"Invalid message hash format.", nil), 400)
+		return
+	}
+	channelID, err := hex.DecodeString(req.ChannelID)
+	if err != nil {
+		writeError(w, r, merrors.New("message.delete.invalid_channel", merrors.Fatal,
+			"Invalid channel ID format.", nil), 400)
+		return
+	}
+
+	// Verify the message exists and was authored by this agent
+	entry, err := s.conn.LogDB().GetEntry(msgHash)
+	if err != nil || entry == nil {
+		writeError(w, r, merrors.New("message.delete.not_found", merrors.Fatal,
+			"Message not found.", nil), 404)
+		return
+	}
+
+	kp := s.conn.KeyPair()
+	if !crypto.ConstantTimeEqual(entry.AuthorKey, kp.Public) {
+		writeError(w, r, merrors.New("message.delete.forbidden", merrors.Fatal,
+			"You can only delete your own messages.", nil), 403)
+		return
+	}
+
+	// Publish tombstone entry
+	del := moltcbor.MessageDelete{
+		MessageHash: msgHash,
+		ChannelID:   channelID,
+	}
+	payload, err := moltcbor.Marshal(del)
+	if err != nil {
+		writeError(w, r, merrors.New("message.delete.marshal_failed", merrors.Fatal,
+			"Failed to prepare delete entry.", nil), 500)
+		return
+	}
+	if err := s.conn.PublishEntry(moltcbor.EntryTypeMessageDelete, payload); err != nil {
+		writeError(w, r, merrors.New("message.delete.publish_failed", merrors.Fatal,
+			fmt.Sprintf("Failed to publish delete: %s", err.Error()), nil), 500)
+		return
+	}
+
+	writeSuccess(w, r, map[string]any{"status": "deleted"})
 }
 
 // --- Send DM ---

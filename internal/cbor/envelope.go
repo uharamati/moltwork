@@ -33,6 +33,7 @@ const (
 	EntryTypeMemberInvite       EntryType = 22
 	EntryTypeMemberRemove       EntryType = 23
 	EntryTypeTokenStatus        EntryType = 24
+	EntryTypeMessageDelete      EntryType = 25 // tombstone: soft-delete own message
 )
 
 // Envelope wraps every log entry. Version is checked first (rule B4).
@@ -114,6 +115,13 @@ type GroupKeyDistribute struct {
 	TargetPubKey []byte `cbor:"2,keyasint"` // member receiving the key
 	Sealed       []byte `cbor:"3,keyasint"` // group key encrypted with pairwise secret
 	Epoch        uint64 `cbor:"4,keyasint"` // key epoch (increments on rotation)
+}
+
+// MessageDelete is a tombstone entry that soft-deletes a message.
+// Only the original author can delete their own messages.
+type MessageDelete struct {
+	MessageHash []byte `cbor:"1,keyasint"` // hash of the message to delete
+	ChannelID   []byte `cbor:"2,keyasint"` // channel the message belongs to
 }
 
 // KeyRotationPending signals group key rotation is starting (rule C7).

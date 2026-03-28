@@ -25,6 +25,27 @@ type DecodedMessage struct {
 	ActivityType string `json:"activity_type,omitempty"` // "message", "thread", "channel_create", "channel_join", "channel_leave", "channel_archive", "channel_unarchive", "member_invite", "member_remove", "revocation", "org_relationship"
 }
 
+// deletedMessageHashes returns a set of message hashes that have been soft-deleted.
+func (c *Connector) deletedMessageHashes() map[string]bool {
+	deleted := make(map[string]bool)
+	entries, err := c.logDB.EntriesByType(int(moltcbor.EntryTypeMessageDelete))
+	if err != nil {
+		return deleted
+	}
+	for _, raw := range entries {
+		payload := decodePayload(raw)
+		if payload == nil {
+			continue
+		}
+		var del moltcbor.MessageDelete
+		if err := moltcbor.Unmarshal(payload, &del); err != nil {
+			continue
+		}
+		deleted[fmt.Sprintf("%x", del.MessageHash)] = true
+	}
+	return deleted
+}
+
 // GetMessages returns decoded messages for a channel since a given timestamp.
 func (c *Connector) GetMessages(channelIDHex string, since int64, limit int) ([]DecodedMessage, error) {
 	channelID, err := hex.DecodeString(channelIDHex)
@@ -41,6 +62,9 @@ func (c *Connector) GetMessages(channelIDHex string, since int64, limit int) ([]
 		limit = 100
 	}
 
+	// Collect deleted message hashes for filtering
+	deleted := c.deletedMessageHashes()
+
 	// Get message entries from the log
 	entries, err := c.logDB.EntriesByTypeInRange(int(moltcbor.EntryTypeMessage), since, limit)
 	if err != nil {
@@ -50,7 +74,7 @@ func (c *Connector) GetMessages(channelIDHex string, since int64, limit int) ([]
 	var messages []DecodedMessage
 	for _, raw := range entries {
 		msg := c.decodeMessageEntry(raw, channelID)
-		if msg != nil {
+		if msg != nil && !deleted[msg.Hash] {
 			messages = append(messages, *msg)
 		}
 	}
@@ -60,7 +84,7 @@ func (c *Connector) GetMessages(channelIDHex string, since int64, limit int) ([]
 	if err == nil {
 		for _, raw := range threadEntries {
 			msg := c.decodeThreadEntry(raw, channelID)
-			if msg != nil {
+			if msg != nil && !deleted[msg.Hash] {
 				messages = append(messages, *msg)
 			}
 		}
@@ -71,7 +95,7 @@ func (c *Connector) GetMessages(channelIDHex string, since int64, limit int) ([]
 	if err == nil {
 		for _, raw := range sealedEntries {
 			msg := c.decodeSealedEntry(raw, channelID)
-			if msg != nil {
+			if msg != nil && !deleted[msg.Hash] {
 				messages = append(messages, *msg)
 			}
 		}
@@ -87,6 +111,9 @@ func (c *Connector) GetNewActivity(since int64, limit int) ([]DecodedMessage, er
 		limit = 200
 	}
 
+	// Collect deleted message hashes for filtering
+	deleted := c.deletedMessageHashes()
+
 	// Fetch all entries since timestamp (any type)
 	allEntries, err := c.logDB.EntriesSince(since, limit)
 	if err != nil {
@@ -96,7 +123,7 @@ func (c *Connector) GetNewActivity(since int64, limit int) ([]DecodedMessage, er
 	var messages []DecodedMessage
 	for _, raw := range allEntries {
 		decoded := c.decodeActivityEntry(raw)
-		if decoded != nil {
+		if decoded != nil && !deleted[decoded.Hash] {
 			messages = append(messages, *decoded)
 		}
 	}
