@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -130,9 +129,28 @@ func (s *KeyDB) migrate() error {
 	}
 
 	// Add rotated_at column if it doesn't exist (migration for existing databases)
-	if _, err := s.db.Exec("ALTER TABLE pairwise_secrets ADD COLUMN rotated_at INTEGER NOT NULL DEFAULT 0"); err != nil {
-		// Ignore "duplicate column" errors — the column already exists
-		if !strings.Contains(err.Error(), "duplicate column") {
+	var hasRotatedAt bool
+	rows, err := s.db.Query("PRAGMA table_info(pairwise_secrets)")
+	if err != nil {
+		return fmt.Errorf("check pairwise_secrets schema: %w", err)
+	}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull int
+		var dflt *string
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan table_info: %w", err)
+		}
+		if name == "rotated_at" {
+			hasRotatedAt = true
+		}
+	}
+	rows.Close()
+	if !hasRotatedAt {
+		if _, err := s.db.Exec("ALTER TABLE pairwise_secrets ADD COLUMN rotated_at INTEGER NOT NULL DEFAULT 0"); err != nil {
 			return fmt.Errorf("alter pairwise_secrets: %w", err)
 		}
 	}

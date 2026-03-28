@@ -380,8 +380,9 @@ func (s *Server) handleJoinRendezvous(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		// Schedule cleanup of the join status entry after 1 hour to prevent
-		// unbounded growth of the joinStatuses sync.Map.
-		defer time.AfterFunc(1*time.Hour, func() {
+		// unbounded growth of the joinStatuses sync.Map. Scheduled immediately
+		// so cleanup fires even if the goroutine panics.
+		time.AfterFunc(1*time.Hour, func() {
 			s.joinStatuses.Delete(joinID)
 		})
 

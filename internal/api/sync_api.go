@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -142,9 +143,9 @@ func (s *Server) handleSyncChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse client's challenge
+	// Parse client's challenge (1MB limit)
 	var req syncChallengeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -233,8 +234,9 @@ const (
 
 // handleSyncPull returns entries the client is missing.
 func (s *Server) handleSyncPull(w http.ResponseWriter, r *http.Request) {
+	// 4MB limit — known_hashes can be large but bounded by maxKnownHashes validation below
 	var req syncPullRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
