@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -38,6 +39,7 @@ type Server struct {
 	diagDB         *store.DiagDB
 	version        string
 	frontend       http.Handler
+	skillFS        fs.FS
 	syncSessions   *syncSessionStore
 	syncLimiter    *authRateLimiter
 	publicServer   *http.Server

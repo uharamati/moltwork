@@ -25,6 +25,9 @@ import (
 //go:embed all:frontend
 var frontendFiles embed.FS
 
+//go:embed all:skill
+var skillFiles embed.FS
+
 var version = "dev"
 var commit = "unknown"
 
@@ -248,6 +251,13 @@ func runServer() {
 	srv.SetHealthChecker(hc)
 	if diagDB != nil {
 		srv.SetDiagDB(diagDB)
+	}
+	// Embed skill files (agent documentation served without auth)
+	skillFS, err := fs.Sub(skillFiles, "skill")
+	if err != nil {
+		log.Warn("skill files not available", map[string]any{"error": err.Error()})
+	} else {
+		srv.SetSkillFiles(skillFS)
 	}
 	// Embed the frontend (built from web/ into cmd/moltwork/frontend/)
 	frontendFS, err := fs.Sub(frontendFiles, "frontend")

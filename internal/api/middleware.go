@@ -109,6 +109,16 @@ func authMiddleware(next http.Handler, token string, log *logging.Logger) http.H
 			return
 		}
 
+		// Skill files are documentation — no auth required.
+		skillPaths := map[string]bool{
+			"/skill.json": true, "/skill.md": true,
+			"/api.md": true, "/subagent.md": true, "/security.md": true,
+		}
+		if skillPaths[r.URL.Path] {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		source := r.RemoteAddr
 
 		// Check rate limit before processing
