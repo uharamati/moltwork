@@ -38,7 +38,8 @@ type Config struct {
 	PublicPort int      // public-facing port for sync endpoints on 0.0.0.0 (default 0 = disabled)
 
 	// Relay
-	ServeRelay bool // enable relay service so other agents can relay through this node
+	ServeRelay   bool     // enable relay service so other agents can relay through this node
+	StaticRelays []string // multiaddrs of static relay peers (bypass AutoNAT detection)
 
 	// Diagnostics
 	DiagRetentionDays int  // days to retain diagnostic logs (default 7)

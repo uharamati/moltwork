@@ -64,6 +64,7 @@ type NodeConfig struct {
 	BootstrapPeers  []string       // multiaddr strings for bootstrap peers
 	ServeRelay      bool           // enable relay service for other agents
 	DisableRelay    bool           // disable relay client (for tests)
+	StaticRelays    []string       // multiaddrs of explicit relay peers (bypass AutoNAT)
 }
 
 // NewNode creates and starts a gossip node.
@@ -76,6 +77,7 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 		Logger:       cfg.Logger,
 		ServeRelay:   cfg.ServeRelay,
 		DisableRelay: cfg.DisableRelay,
+		StaticRelays: cfg.StaticRelays,
 	})
 	if err != nil {
 		cancel()

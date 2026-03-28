@@ -219,6 +219,7 @@ func (c *Connector) Start(ctx context.Context) error {
 		Validator:       c.registry,
 		BootstrapPeers:  c.cfg.BootstrapPeers,
 		ServeRelay:      c.cfg.ServeRelay,
+		StaticRelays:    c.cfg.StaticRelays,
 	})
 	if err != nil {
 		c.Close()

@@ -8,6 +8,7 @@ import (
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
+	multiaddr "github.com/multiformats/go-multiaddr"
 
 	libp2p "github.com/libp2p/go-libp2p"
 
@@ -25,8 +26,9 @@ type HostConfig struct {
 	PrivateKey   ed25519.PrivateKey // Moltwork Ed25519 key (rule N3: peer ID derived from this)
 	PSK          []byte             // pre-shared key for network gating (rule N3)
 	Logger       *logging.Logger
-	ServeRelay   bool // enable relay service (this node relays traffic for others)
-	DisableRelay bool // disable relay client entirely (for tests)
+	ServeRelay   bool     // enable relay service (this node relays traffic for others)
+	DisableRelay bool     // disable relay client entirely (for tests)
+	StaticRelays []string // explicit relay peer multiaddrs (bypass AutoNAT detection)
 }
 
 // NewHost creates a libp2p host with Noise encryption and Ed25519 identity.
@@ -56,34 +58,62 @@ func NewHost(ctx context.Context, cfg HostConfig) (host.Host, error) {
 		// (e.g. when connecting to a peer behind NAT). Zero cost when not used.
 		opts = append(opts, libp2p.EnableRelay())
 
-		// AutoRelay: when behind NAT, discover relay-capable peers from
-		// connected peers and get a relay address through them.
-		opts = append(opts,
-			libp2p.EnableAutoRelayWithPeerSource(
-				func(ctx context.Context, num int) <-chan peer.AddrInfo {
-					ch := make(chan peer.AddrInfo)
-					go func() {
-						defer close(ch)
-						if hostRef == nil {
-							return
-						}
-						for _, p := range hostRef.Network().Peers() {
-							select {
-							case ch <- peer.AddrInfo{
-								ID:    p,
-								Addrs: hostRef.Network().Peerstore().Addrs(p),
-							}:
-							case <-ctx.Done():
+		if len(cfg.StaticRelays) > 0 {
+			// Static relays: use explicitly configured relay peers instead of
+			// waiting for AutoNAT to detect NAT status. This is needed when
+			// the agent is behind NAT and AutoNAT detection is too slow.
+			var relayInfos []peer.AddrInfo
+			for _, addr := range cfg.StaticRelays {
+				ma, err := multiaddr.NewMultiaddr(addr)
+				if err != nil {
+					cfg.Logger.Warn("invalid static relay address", map[string]any{"addr": addr, "error": err.Error()})
+					continue
+				}
+				info, err := peer.AddrInfoFromP2pAddr(ma)
+				if err != nil {
+					cfg.Logger.Warn("cannot parse relay peer info", map[string]any{"addr": addr, "error": err.Error()})
+					continue
+				}
+				relayInfos = append(relayInfos, *info)
+				cfg.Logger.Info("using static relay", map[string]any{"peer": info.ID.String()})
+			}
+			if len(relayInfos) > 0 {
+				opts = append(opts,
+					libp2p.EnableAutoRelayWithStaticRelays(relayInfos),
+					libp2p.EnableAutoNATv2(),
+					libp2p.EnableHolePunching(),
+				)
+			}
+		} else {
+			// AutoRelay: when behind NAT, discover relay-capable peers from
+			// connected peers and get a relay address through them.
+			opts = append(opts,
+				libp2p.EnableAutoRelayWithPeerSource(
+					func(ctx context.Context, num int) <-chan peer.AddrInfo {
+						ch := make(chan peer.AddrInfo)
+						go func() {
+							defer close(ch)
+							if hostRef == nil {
 								return
 							}
-						}
-					}()
-					return ch
-				},
-			),
-			libp2p.EnableAutoNATv2(),
-			libp2p.EnableHolePunching(),
-		)
+							for _, p := range hostRef.Network().Peers() {
+								select {
+								case ch <- peer.AddrInfo{
+									ID:    p,
+									Addrs: hostRef.Network().Peerstore().Addrs(p),
+								}:
+								case <-ctx.Done():
+									return
+								}
+							}
+						}()
+						return ch
+					},
+				),
+				libp2p.EnableAutoNATv2(),
+				libp2p.EnableHolePunching(),
+			)
+		}
 	}
 
 	// Serve as a relay for other agents (only on the bootstrapping agent

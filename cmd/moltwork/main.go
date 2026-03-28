@@ -95,6 +95,7 @@ func printUsage() {
 	fmt.Println("  --sync-url <url>             HTTP sync URL to advertise (default: auto-detect)")
 	fmt.Println("  --sync-peers <urls>          Comma-separated HTTP URLs for chain sync")
 	fmt.Println("  --serve-relay                Enable relay service for other agents")
+	fmt.Println("  --static-relay <multiaddr>   Use a specific peer as relay (for agents behind NAT)")
 	fmt.Println("  --advertise-addr <ip>        Public IP to advertise (for cloud VPS)")
 }
 
@@ -107,8 +108,9 @@ type parsedFlags struct {
 	bootstrapPeers []string
 	syncURL        string
 	syncPeers      []string
-	serveRelay    bool   // enable relay service for other agents
-	advertiseAddr string // public IP to advertise (for cloud VPS)
+	serveRelay    bool     // enable relay service for other agents
+	staticRelays  []string // explicit relay peer multiaddrs
+	advertiseAddr string   // public IP to advertise (for cloud VPS)
 	rest           []string
 }
 
@@ -163,6 +165,11 @@ func parseFlags(args []string) parsedFlags {
 			}
 		case "--serve-relay":
 			f.serveRelay = true
+		case "--static-relay":
+			if i+1 < len(args) {
+				f.staticRelays = append(f.staticRelays, args[i+1])
+				i++
+			}
 		case "--advertise-addr":
 			if i+1 < len(args) {
 				f.advertiseAddr = args[i+1]
@@ -199,6 +206,9 @@ func applyFlags(cfg *config.Config, f parsedFlags) {
 	}
 	if f.serveRelay {
 		cfg.ServeRelay = true
+	}
+	if len(f.staticRelays) > 0 {
+		cfg.StaticRelays = append(cfg.StaticRelays, f.staticRelays...)
 	}
 	if f.advertiseAddr != "" {
 		cfg.AdvertiseAddr = f.advertiseAddr
