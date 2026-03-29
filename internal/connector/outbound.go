@@ -360,6 +360,11 @@ func (c *Connector) SendThreadMessage(channelID, parentHash, content []byte) err
 		return fmt.Errorf("not a member of this channel")
 	}
 
+	// Validate parent message exists to prevent orphaned thread chains (M17)
+	if parent, err := c.logDB.GetEntry(parentHash); err != nil || parent == nil {
+		return fmt.Errorf("parent message not found")
+	}
+
 	// For public/permanent channels: publish as normal ThreadMessage entry
 	if ch.Type == moltcbor.ChannelTypePermanent || ch.Type == moltcbor.ChannelTypePublic {
 		msg := moltcbor.ThreadMessage{

@@ -83,6 +83,12 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 	}
 	channels = channels[offset:end]
 
+	// Build agent lookup map once — O(1) per member instead of O(n) (M15)
+	agentMap := make(map[string]*identity.Agent)
+	for _, a := range registry.All() {
+		agentMap[fmt.Sprintf("%x", a.PublicKey)] = a
+	}
+
 	result := make([]map[string]any, 0, len(channels))
 	for _, ch := range channels {
 		// Resolve member public keys to display names
@@ -92,19 +98,13 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 				"public_key": keyHex,
 				"is_admin":   ch.Admins[keyHex],
 			}
-			// Look up agent details from registry
-			if agents := registry.All(); len(agents) > 0 {
-				for _, a := range agents {
-					if fmt.Sprintf("%x", a.PublicKey) == keyHex {
-						member["display_name"] = a.DisplayName
-						member["agent_id"] = identity.AgentID(a.PublicKey)
-						member["human_name"] = a.HumanName
-						member["title"] = a.Title
-						member["team"] = a.Team
-						member["revoked"] = a.Revoked
-						break
-					}
-				}
+			if a, ok := agentMap[keyHex]; ok {
+				member["display_name"] = a.DisplayName
+				member["agent_id"] = identity.AgentID(a.PublicKey)
+				member["human_name"] = a.HumanName
+				member["title"] = a.Title
+				member["team"] = a.Team
+				member["revoked"] = a.Revoked
 			}
 			members = append(members, member)
 		}
@@ -424,9 +424,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Try FTS5 full-text search first — scales to any log size.
-	// Falls back to in-memory scan if FTS index is empty (first run before indexing).
+	// Only fall back to in-memory scan if FTS query itself fails (index missing/corrupt),
+	// not on zero results (which is a valid empty result).
 	ftsResults, ftsErr := s.conn.LogDB().SearchFTS(query, limit)
-	if ftsErr == nil && len(ftsResults) > 0 {
+	if ftsErr == nil {
 		results := make([]map[string]any, 0, len(ftsResults))
 		for _, r := range ftsResults {
 			results = append(results, map[string]any{
@@ -440,7 +441,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fallback: scan recent activity (capped at 10K for memory safety)
+	// Fallback: scan recent activity (capped at 10K for memory safety).
+	// Only reached when FTS index is unavailable (first run, corrupt table).
 	allMsgs, err := s.conn.GetNewActivity(0, 10000)
 	if err != nil {
 		writeError(w, r, err, 500)

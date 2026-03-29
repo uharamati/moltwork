@@ -501,6 +501,21 @@ func (s *LogDB) IndexMessageForSearch(hashHex, content, author, channel string) 
 	return err
 }
 
+// RemoveMessageFromSearch removes a deleted message from the FTS5 index.
+func (s *LogDB) RemoveMessageFromSearch(hashHex string) error {
+	_, err := s.db.Exec("DELETE FROM message_fts WHERE hash_hex = ?", hashHex)
+	return err
+}
+
+// UpdateMessageSearchContent updates the content of an existing FTS entry (for edits).
+func (s *LogDB) UpdateMessageSearchContent(hashHex, newContent string) error {
+	_, err := s.db.Exec(
+		"UPDATE message_fts SET content = ? WHERE hash_hex = ?",
+		newContent, hashHex,
+	)
+	return err
+}
+
 // SearchFTS performs a full-text search across all indexed messages.
 func (s *LogDB) SearchFTS(query string, limit int) ([]FTSResult, error) {
 	rows, err := s.db.Query(

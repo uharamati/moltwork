@@ -223,7 +223,9 @@ func HandleIncomingSync(s network.Stream, logDB *store.LogDB, psk []byte, valida
 	// Fast path: if neither side has anything to exchange, close early
 	// to avoid the i/o deadline noise that fires every sync cycle
 	if !theyNeed && !weNeed {
-		writeMsg(s, MsgTypeDone, nil)
+		if err := writeMsg(s, MsgTypeDone, nil); err != nil {
+			log.Debug("write done msg failed", map[string]any{"error": err.Error()})
+		}
 		newWatermark, _ := logDB.MaxCreatedAt()
 		return newWatermark
 	}
@@ -366,7 +368,9 @@ func InitiateSync(s network.Stream, logDB *store.LogDB, psk []byte, validator Ag
 
 	// Fast path: nothing to exchange
 	if !theyNeed && !weNeed {
-		writeMsg(s, MsgTypeDone, nil)
+		if err := writeMsg(s, MsgTypeDone, nil); err != nil {
+			log.Debug("write done msg failed", map[string]any{"error": err.Error()})
+		}
 		newWatermark, _ := logDB.MaxCreatedAt()
 		return SyncResult{NewWatermark: newWatermark}, ErrNoNewEntries
 	}
@@ -396,7 +400,9 @@ func InitiateSync(s network.Stream, logDB *store.LogDB, psk []byte, validator Ag
 		}
 	}
 
-	writeMsg(s, MsgTypeDone, nil)
+	if err := writeMsg(s, MsgTypeDone, nil); err != nil {
+		log.Debug("write done msg failed", map[string]any{"error": err.Error()})
+	}
 	newWatermark, _ := logDB.MaxCreatedAt()
 	return SyncResult{NewWatermark: newWatermark}, nil
 }

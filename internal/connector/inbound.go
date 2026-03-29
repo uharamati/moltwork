@@ -79,6 +79,8 @@ func (c *Connector) deletedMessageHashes() map[string]bool {
 		}
 
 		deleted[msgHashHex] = true
+		// Remove from FTS index so deleted content is no longer searchable (Scout-1)
+		c.logDB.RemoveMessageFromSearch(msgHashHex)
 	}
 
 	c.deletedHashCacheMu.Lock()
@@ -140,6 +142,8 @@ func (c *Connector) editedMessages() map[string]string {
 		}
 
 		edited[msgHashHex] = string(edit.NewContent)
+		// Update FTS content so search reflects edits (Scout-2)
+		c.logDB.UpdateMessageSearchContent(msgHashHex, string(edit.NewContent))
 	}
 
 	c.editedMsgCacheMu.Lock()

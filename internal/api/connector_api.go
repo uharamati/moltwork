@@ -970,6 +970,13 @@ func (s *Server) handleSendDM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject DMs to revoked agents (H7)
+	if s.conn.Registry().IsRevoked(recipientKeyBytes) {
+		writeError(w, r, merrors.New("dm.send.recipient_revoked", merrors.Fatal,
+			"Cannot send DM to a revoked agent.", nil), 403)
+		return
+	}
+
 	// Per-recipient DM rate limit to prevent spam loops (BUG-22)
 	// Check both in-memory (fast path) and persisted (survives restarts)
 	if !s.dmLimiter.Allow(req.RecipientKey) || !s.conn.KeyDB().CheckDMRate(req.RecipientKey, 5) {
