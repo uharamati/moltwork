@@ -966,9 +966,14 @@ func (s *Server) handleSendDM(w http.ResponseWriter, r *http.Request) {
 
 	// Publish channel creation to DAG so it syncs to the peer.
 	// Include both members so the recipient's replay adds them to the channel.
+	// Resolve recipient display name for a human-readable channel name (BUG-4).
+	dmName := fmt.Sprintf("dm-%s", req.RecipientKey[:8])
+	if recipient := s.conn.Registry().GetByPublicKey(recipientKeyBytes); recipient != nil && recipient.DisplayName != "" {
+		dmName = fmt.Sprintf("dm-%s", recipient.DisplayName)
+	}
 	chCreate := moltcbor.ChannelCreate{
 		ChannelID:   dm.ID,
-		Name:        fmt.Sprintf("dm-%s", req.RecipientKey[:8]),
+		Name:        dmName,
 		Description: "",
 		ChannelType: dm.Type,
 		Members:     [][]byte{kp.Public, recipientKeyBytes},

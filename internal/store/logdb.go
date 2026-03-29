@@ -228,6 +228,35 @@ func (s *LogDB) AllHashes() ([][]byte, error) {
 	return hashes, rows.Err()
 }
 
+// HashesSince returns entry hashes with created_at > since.
+// Used by incremental sync to exchange only recent hashes instead of the full set.
+// Uses idx_entries_created index for efficient range queries.
+func (s *LogDB) HashesSince(since int64) ([][]byte, error) {
+	rows, err := s.db.Query("SELECT hash FROM entries WHERE created_at > ?", since)
+	if err != nil {
+		return nil, fmt.Errorf("hashes since: %w", err)
+	}
+	defer rows.Close()
+
+	var hashes [][]byte
+	for rows.Next() {
+		var h []byte
+		if err := rows.Scan(&h); err != nil {
+			return nil, fmt.Errorf("scan hash: %w", err)
+		}
+		hashes = append(hashes, h)
+	}
+	return hashes, rows.Err()
+}
+
+// MaxCreatedAt returns the maximum created_at timestamp across all entries.
+// Returns 0 if the log is empty.
+func (s *LogDB) MaxCreatedAt() (int64, error) {
+	var ts int64
+	err := s.db.QueryRow("SELECT COALESCE(MAX(created_at), 0) FROM entries").Scan(&ts)
+	return ts, err
+}
+
 // AllEntries returns all entries in the log with their parent hashes.
 // Uses a single JOIN query instead of N+1 GetParents calls.
 func (s *LogDB) AllEntries() ([]*RawEntry, error) {

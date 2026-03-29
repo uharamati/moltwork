@@ -42,8 +42,11 @@ const maxHashSetSize = 100_000
 var ErrNoNewEntries = errors.New("no new entries")
 
 // HashSetMsg contains the set of entry hashes a node has.
+// When Watermark > 0, Hashes contains only entries with created_at > Watermark
+// (incremental sync). When Watermark == 0, Hashes contains all entries (full sync).
 type HashSetMsg struct {
-	Hashes [][]byte `cbor:"1,keyasint"`
+	Hashes    [][]byte `cbor:"1,keyasint"`
+	Watermark int64    `cbor:"2,keyasint,omitempty"`
 }
 
 // RequestMsg is reserved for future use (was part of MsgTypeRequest, unused in v1).
@@ -113,7 +116,11 @@ func readMsg(s network.Stream) (uint8, []byte, error) {
 }
 
 // HandleIncomingSync handles an incoming sync stream from a peer.
-func HandleIncomingSync(s network.Stream, logDB *store.LogDB, psk []byte, validator AgentValidator, log *logging.Logger) {
+// The watermark parameter controls incremental sync: when > 0, only hashes
+// for entries with created_at > watermark are exchanged. When 0, a full
+// hash set exchange is performed. Returns the new watermark to store for
+// this peer (max created_at across both logs after sync).
+func HandleIncomingSync(s network.Stream, logDB *store.LogDB, psk []byte, validator AgentValidator, log *logging.Logger, watermark int64) int64 {
 	defer s.Close()
 	// Bound all reads/writes so a stalled peer can't hang this goroutine forever.
 	s.SetDeadline(time.Now().Add(60 * time.Second))
@@ -122,44 +129,61 @@ func HandleIncomingSync(s network.Stream, logDB *store.LogDB, psk []byte, valida
 	// Step 1: PSK authentication (rule N3)
 	if err := authenticateIncoming(s, psk); err != nil {
 		log.Warn("PSK auth failed", map[string]any{"peer": remotePeer.String(), "error": err.Error()})
-		return
+		return 0
 	}
 
-	// Step 2: Receive their hash set
+	// Step 2: Receive their hash set (includes their watermark)
 	msgType, payload, err := readMsg(s)
 	if err != nil || msgType != MsgTypeHashSet {
 		log.Warn("expected hash set", map[string]any{"peer": remotePeer.String()})
-		return
+		return 0
 	}
 
 	var theirHashes HashSetMsg
 	if err := moltcbor.UnmarshalInternal(payload, &theirHashes); err != nil {
 		log.Warn("decode hash set", map[string]any{"peer": remotePeer.String(), "error": err.Error()})
-		return
+		return 0
 	}
 
 	// Limit hash set size to prevent OOM from malicious peers
 	if len(theirHashes.Hashes) > maxHashSetSize {
 		log.Warn("peer sent oversized hash set", map[string]any{"peer": remotePeer.String(), "count": len(theirHashes.Hashes)})
-		return
+		return 0
 	}
+
+	// Negotiate watermark: use incremental sync only if both sides agree.
+	// effectiveWatermark = min of both watermarks; if either is 0, do full sync.
+	effectiveWatermark := negotiateWatermark(watermark, theirHashes.Watermark)
 
 	// Step 3: Send our hash set
-	ourHashes, err := logDB.AllHashes()
+	var ourHashes [][]byte
+	if effectiveWatermark > 0 {
+		ourHashes, err = logDB.HashesSince(effectiveWatermark)
+	} else {
+		ourHashes, err = logDB.AllHashes()
+	}
 	if err != nil {
-		log.Error("get all hashes", map[string]any{"error": err.Error()})
-		return
+		log.Error("get hashes", map[string]any{"error": err.Error()})
+		return 0
 	}
 
-	ourHashMsg := HashSetMsg{Hashes: ourHashes}
+	ourHashMsg := HashSetMsg{Hashes: ourHashes, Watermark: watermark}
 	ourHashBytes, err := moltcbor.Marshal(ourHashMsg)
 	if err != nil {
 		log.Error("marshal hash set", map[string]any{"error": err.Error()})
-		return
+		return 0
 	}
 	if err := writeMsg(s, MsgTypeHashSet, ourHashBytes); err != nil {
 		log.Warn("send hash set", map[string]any{"error": err.Error()})
-		return
+		return 0
+	}
+
+	if effectiveWatermark > 0 {
+		log.Debug("incremental sync", map[string]any{
+			"peer":      remotePeer.String(),
+			"watermark": effectiveWatermark,
+			"our_delta": len(ourHashes),
+		})
 	}
 
 	// Step 4: Compute what they need and send
@@ -200,60 +224,27 @@ func HandleIncomingSync(s network.Stream, logDB *store.LogDB, psk []byte, valida
 	// to avoid the i/o deadline noise that fires every sync cycle
 	if !theyNeed && !weNeed {
 		writeMsg(s, MsgTypeDone, nil)
-		return
+		newWatermark, _ := logDB.MaxCreatedAt()
+		return newWatermark
 	}
 
 	if theyNeed {
-		// Send entries in chunks to stay under the 4MB message limit
-		const maxBatchBytes = 3 * 1024 * 1024 // 3MB to leave headroom
-		var batch []RawSyncEntry
-		batchSize := 0
-		for _, e := range toSend {
-			entrySize := len(e.RawCBOR) + len(e.Hash) + len(e.AuthorKey) + len(e.Signature) + 100 // overhead
-			if batchSize+entrySize > maxBatchBytes && len(batch) > 0 {
-				// Send this batch
-				entriesMsg := EntriesMsg{Entries: batch}
-				entriesBytes, err := moltcbor.Marshal(entriesMsg)
-				if err != nil {
-					log.Error("marshal entries", map[string]any{"error": err.Error()})
-					return
-				}
-				if err := writeMsg(s, MsgTypeEntries, entriesBytes); err != nil {
-					log.Warn("send entries", map[string]any{"error": err.Error()})
-					return
-				}
-				batch = batch[:0]
-				batchSize = 0
-			}
-			batch = append(batch, e)
-			batchSize += entrySize
-		}
-		// Send remaining
-		if len(batch) > 0 {
-			entriesMsg := EntriesMsg{Entries: batch}
-			entriesBytes, err := moltcbor.Marshal(entriesMsg)
-			if err != nil {
-				log.Error("marshal entries", map[string]any{"error": err.Error()})
-				return
-			}
-			if err := writeMsg(s, MsgTypeEntries, entriesBytes); err != nil {
-				log.Warn("send entries", map[string]any{"error": err.Error()})
-				return
-			}
+		if err := sendEntriesInBatches(s, toSend, log); err != nil {
+			return 0
 		}
 	}
 
 	// Signal end of our entries
 	if err := writeMsg(s, MsgTypeDone, nil); err != nil {
 		log.Warn("send done", map[string]any{"error": err.Error()})
-		return
+		return 0
 	}
 
 	// Step 5: Receive what we need (loop for chunked entries)
 	for {
 		msgType, payload, err = readMsg(s)
 		if err != nil {
-			return
+			return 0
 		}
 		if msgType == MsgTypeDone {
 			break
@@ -267,48 +258,77 @@ func HandleIncomingSync(s network.Stream, logDB *store.LogDB, psk []byte, valida
 			StoreEntries(logDB, incoming.Entries, validator, log)
 		}
 	}
+
+	newWatermark, _ := logDB.MaxCreatedAt()
+	return newWatermark
+}
+
+// SyncResult contains the outcome of InitiateSync for the caller to update
+// its per-peer watermark tracking.
+type SyncResult struct {
+	NewWatermark int64 // max created_at after sync; store as watermark for next sync
 }
 
 // InitiateSync starts a sync with a remote peer.
-func InitiateSync(s network.Stream, logDB *store.LogDB, psk []byte, validator AgentValidator, log *logging.Logger) error {
+// The watermark parameter controls incremental sync: when > 0, only hashes
+// for entries with created_at > watermark are exchanged. When 0, a full
+// hash set exchange is performed.
+func InitiateSync(s network.Stream, logDB *store.LogDB, psk []byte, validator AgentValidator, log *logging.Logger, watermark int64) (SyncResult, error) {
 	defer s.Close()
 	// Bound all reads/writes so a stalled peer can't hang the sync loop forever.
 	s.SetDeadline(time.Now().Add(60 * time.Second))
 
 	// Step 1: PSK authentication
 	if err := authenticateOutgoing(s, psk); err != nil {
-		return fmt.Errorf("PSK auth: %w", err)
+		return SyncResult{}, fmt.Errorf("PSK auth: %w", err)
 	}
 
-	// Step 2: Send our hash set
-	ourHashes, err := logDB.AllHashes()
+	// Step 2: Send our hash set with watermark
+	// On first sync (watermark=0), send all hashes. On subsequent syncs,
+	// send only hashes for entries newer than the watermark.
+	var ourHashes [][]byte
+	var err error
+	if watermark > 0 {
+		ourHashes, err = logDB.HashesSince(watermark)
+	} else {
+		ourHashes, err = logDB.AllHashes()
+	}
 	if err != nil {
-		return fmt.Errorf("get hashes: %w", err)
+		return SyncResult{}, fmt.Errorf("get hashes: %w", err)
 	}
 
-	hashMsg := HashSetMsg{Hashes: ourHashes}
+	hashMsg := HashSetMsg{Hashes: ourHashes, Watermark: watermark}
 	hashBytes, err := moltcbor.Marshal(hashMsg)
 	if err != nil {
-		return fmt.Errorf("marshal hash set: %w", err)
+		return SyncResult{}, fmt.Errorf("marshal hash set: %w", err)
 	}
 	if err := writeMsg(s, MsgTypeHashSet, hashBytes); err != nil {
-		return fmt.Errorf("send hash set: %w", err)
+		return SyncResult{}, fmt.Errorf("send hash set: %w", err)
 	}
 
 	// Step 3: Receive their hash set
 	msgType, payload, err := readMsg(s)
 	if err != nil || msgType != MsgTypeHashSet {
-		return fmt.Errorf("expected hash set from peer")
+		return SyncResult{}, fmt.Errorf("expected hash set from peer")
 	}
 
 	var theirHashes HashSetMsg
 	if err := moltcbor.UnmarshalInternal(payload, &theirHashes); err != nil {
-		return fmt.Errorf("decode their hashes: %w", err)
+		return SyncResult{}, fmt.Errorf("decode their hashes: %w", err)
 	}
 
 	// Limit hash set size to prevent OOM from malicious peers
 	if len(theirHashes.Hashes) > maxHashSetSize {
-		return fmt.Errorf("peer sent oversized hash set: %d entries", len(theirHashes.Hashes))
+		return SyncResult{}, fmt.Errorf("peer sent oversized hash set: %d entries", len(theirHashes.Hashes))
+	}
+
+	effectiveWatermark := negotiateWatermark(watermark, theirHashes.Watermark)
+	if effectiveWatermark > 0 {
+		log.Debug("incremental sync", map[string]any{
+			"peer":      s.Conn().RemotePeer().String(),
+			"watermark": effectiveWatermark,
+			"our_delta": len(ourHashes),
+		})
 	}
 
 	// Step 4: Compute what they need
@@ -347,14 +367,15 @@ func InitiateSync(s network.Stream, logDB *store.LogDB, psk []byte, validator Ag
 	// Fast path: nothing to exchange
 	if !theyNeed && !weNeed {
 		writeMsg(s, MsgTypeDone, nil)
-		return ErrNoNewEntries
+		newWatermark, _ := logDB.MaxCreatedAt()
+		return SyncResult{NewWatermark: newWatermark}, ErrNoNewEntries
 	}
 
 	// Step 5: Receive entries they're sending us (loop for chunked entries)
 	for {
 		msgType, payload, err = readMsg(s)
 		if err != nil {
-			return fmt.Errorf("read entries: %w", err)
+			return SyncResult{}, fmt.Errorf("read entries: %w", err)
 		}
 		if msgType == MsgTypeDone {
 			break
@@ -362,7 +383,7 @@ func InitiateSync(s network.Stream, logDB *store.LogDB, psk []byte, validator Ag
 		if msgType == MsgTypeEntries {
 			var incoming EntriesMsg
 			if err := moltcbor.UnmarshalInternal(payload, &incoming); err != nil {
-				return fmt.Errorf("decode entries: %w", err)
+				return SyncResult{}, fmt.Errorf("decode entries: %w", err)
 			}
 			StoreEntries(logDB, incoming.Entries, validator, log)
 		}
@@ -370,43 +391,73 @@ func InitiateSync(s network.Stream, logDB *store.LogDB, psk []byte, validator Ag
 
 	// Step 6: Send entries they need
 	if theyNeed {
-		// Send entries in chunks to stay under the 4MB message limit
-		const maxBatchBytes = 3 * 1024 * 1024 // 3MB to leave headroom
-		var batch []RawSyncEntry
-		batchSize := 0
-		for _, e := range toSend {
-			entrySize := len(e.RawCBOR) + len(e.Hash) + len(e.AuthorKey) + len(e.Signature) + 100 // overhead
-			if batchSize+entrySize > maxBatchBytes && len(batch) > 0 {
-				entriesMsg := EntriesMsg{Entries: batch}
-				entriesBytes, err := moltcbor.Marshal(entriesMsg)
-				if err != nil {
-					return fmt.Errorf("marshal entries: %w", err)
-				}
-				if err := writeMsg(s, MsgTypeEntries, entriesBytes); err != nil {
-					return fmt.Errorf("send entries: %w", err)
-				}
-				batch = batch[:0]
-				batchSize = 0
-			}
-			batch = append(batch, e)
-			batchSize += entrySize
-		}
-		// Send remaining
-		if len(batch) > 0 {
-			entriesMsg := EntriesMsg{Entries: batch}
-			entriesBytes, err := moltcbor.Marshal(entriesMsg)
-			if err != nil {
-				return fmt.Errorf("marshal entries: %w", err)
-			}
-			if err := writeMsg(s, MsgTypeEntries, entriesBytes); err != nil {
-				return fmt.Errorf("send entries: %w", err)
-			}
+		if err := sendEntriesInBatches(s, toSend, log); err != nil {
+			return SyncResult{}, err
 		}
 	}
 
 	writeMsg(s, MsgTypeDone, nil)
+	newWatermark, _ := logDB.MaxCreatedAt()
+	return SyncResult{NewWatermark: newWatermark}, nil
+}
+
+// negotiateWatermark returns the effective watermark for incremental sync.
+// If either side has watermark 0 (requesting full sync), returns 0.
+// Otherwise returns the minimum of both watermarks to ensure both sides
+// exchange hashes covering the full range since their last shared state.
+func negotiateWatermark(ours, theirs int64) int64 {
+	if ours == 0 || theirs == 0 {
+		return 0
+	}
+	if ours < theirs {
+		return ours
+	}
+	return theirs
+}
+
+// sendEntriesInBatches sends entries in chunks to stay under the 4MB message limit.
+func sendEntriesInBatches(s network.Stream, entries []RawSyncEntry, log *logging.Logger) error {
+	const maxBatchBytes = 3 * 1024 * 1024 // 3MB to leave headroom
+	var batch []RawSyncEntry
+	batchSize := 0
+	for _, e := range entries {
+		entrySize := len(e.RawCBOR) + len(e.Hash) + len(e.AuthorKey) + len(e.Signature) + 100 // overhead
+		if batchSize+entrySize > maxBatchBytes && len(batch) > 0 {
+			entriesMsg := EntriesMsg{Entries: batch}
+			entriesBytes, err := moltcbor.Marshal(entriesMsg)
+			if err != nil {
+				log.Error("marshal entries", map[string]any{"error": err.Error()})
+				return fmt.Errorf("marshal entries: %w", err)
+			}
+			if err := writeMsg(s, MsgTypeEntries, entriesBytes); err != nil {
+				log.Warn("send entries", map[string]any{"error": err.Error()})
+				return fmt.Errorf("send entries: %w", err)
+			}
+			batch = batch[:0]
+			batchSize = 0
+		}
+		batch = append(batch, e)
+		batchSize += entrySize
+	}
+	// Send remaining
+	if len(batch) > 0 {
+		entriesMsg := EntriesMsg{Entries: batch}
+		entriesBytes, err := moltcbor.Marshal(entriesMsg)
+		if err != nil {
+			log.Error("marshal entries", map[string]any{"error": err.Error()})
+			return fmt.Errorf("marshal entries: %w", err)
+		}
+		if err := writeMsg(s, MsgTypeEntries, entriesBytes); err != nil {
+			log.Warn("send entries", map[string]any{"error": err.Error()})
+			return fmt.Errorf("send entries: %w", err)
+		}
+	}
 	return nil
 }
+
+// FullSyncInterval controls how often a full (non-incremental) sync is forced
+// to catch entries from third parties with timestamps older than the watermark.
+const FullSyncInterval = 10
 
 // isZeroPSK checks if the PSK is all zeros (placeholder before real PSK is set).
 func isZeroPSK(psk []byte) bool {

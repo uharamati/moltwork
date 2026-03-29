@@ -34,13 +34,21 @@ type Node struct {
 	syncMu       sync.RWMutex
 
 	// Per-peer sync locks to prevent concurrent syncs with the same peer
-	peerSyncMu sync.Mutex
+	peerSyncMu  sync.Mutex
 	activePeers map[peer.ID]bool
+
+	// Per-peer watermarks for incremental sync.
+	// After a successful sync with a peer, the watermark is set to the max
+	// created_at across both logs. On next sync, only hashes after this
+	// watermark are exchanged. Reset to 0 on PSK rotation.
+	watermarkMu     sync.Mutex
+	peerWatermarks  map[peer.ID]int64
+	peerSyncCounts  map[peer.ID]int // tracks cycles per peer for periodic full sync
 
 	minPeers int // minimum peer count before warning
 
 	// Rate-limit peer count warnings
-	peerWarnMu  sync.Mutex
+	peerWarnMu   sync.Mutex
 	lastPeerWarn time.Time
 
 	onSyncComplete func() // called after entries are received via gossip
@@ -102,17 +110,19 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 	}
 
 	n := &Node{
-		host:        h,
-		logDB:       cfg.LogDB,
-		psk:         cfg.PSK,
-		log:         cfg.Logger,
-		tracker:     tracker,
-		limiter:     NewRateLimiter(rateLimit, time.Minute),
-		validator:   cfg.Validator,
-		minPeers:    minPeers,
-		activePeers: make(map[peer.ID]bool),
-		ctx:         ctx,
-		cancel:      cancel,
+		host:           h,
+		logDB:          cfg.LogDB,
+		psk:            cfg.PSK,
+		log:            cfg.Logger,
+		tracker:        tracker,
+		limiter:        NewRateLimiter(rateLimit, time.Minute),
+		validator:      cfg.Validator,
+		minPeers:       minPeers,
+		activePeers:    make(map[peer.ID]bool),
+		peerWatermarks: make(map[peer.ID]int64),
+		peerSyncCounts: make(map[peer.ID]int),
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 
 	// Register sync protocol handler
@@ -136,7 +146,11 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 			Addrs: []multiaddr.Multiaddr{remoteAddr},
 		})
 
-		HandleIncomingSync(s, cfg.LogDB, n.getPSK(), n.validator, cfg.Logger)
+		watermark := n.getWatermark(remotePeer)
+		newWatermark := HandleIncomingSync(s, cfg.LogDB, n.getPSK(), n.validator, cfg.Logger, watermark)
+		if newWatermark > 0 {
+			n.setWatermark(remotePeer, newWatermark)
+		}
 		if n.onSyncComplete != nil {
 			n.onSyncComplete()
 		}
@@ -264,6 +278,10 @@ func (n *Node) syncWithPeers() {
 				}
 			}
 
+			// Determine watermark: use incremental sync unless it's time
+			// for a periodic full sync to catch third-party stragglers.
+			watermark := n.getWatermarkForSync(pi.ID)
+
 			// Open sync stream with timeout
 			streamCtx, streamCancel := context.WithTimeout(n.ctx, 15*time.Second)
 			defer streamCancel()
@@ -273,14 +291,22 @@ func (n *Node) syncWithPeers() {
 				return
 			}
 
-			if err := InitiateSync(s, n.logDB, n.getPSK(), n.validator, n.log); err != nil {
+			result, err := InitiateSync(s, n.logDB, n.getPSK(), n.validator, n.log, watermark)
+			if err != nil {
 				if errors.Is(err, ErrNoNewEntries) {
-					// Sync completed but no new data — skip expensive rebuild
+					// Sync completed but no new data — skip expensive rebuild.
+					// Still update watermark since we confirmed we're in sync.
+					if result.NewWatermark > 0 {
+						n.setWatermark(pi.ID, result.NewWatermark)
+					}
 					n.log.Debug("sync completed (no new entries)", map[string]any{"peer": pi.ID.String()})
 				} else {
 					n.log.Debug("sync failed", map[string]any{"peer": pi.ID.String(), "error": err.Error()})
 				}
 			} else {
+				if result.NewWatermark > 0 {
+					n.setWatermark(pi.ID, result.NewWatermark)
+				}
 				n.log.Debug("sync completed", map[string]any{"peer": pi.ID.String()})
 				n.syncMu.Lock()
 				n.lastSyncTime = time.Now()
@@ -321,6 +347,44 @@ func (n *Node) SetOnSyncComplete(fn func()) {
 	n.onSyncComplete = fn
 }
 
+// getWatermark returns the stored watermark for a peer (0 if unknown).
+func (n *Node) getWatermark(peerID peer.ID) int64 {
+	n.watermarkMu.Lock()
+	defer n.watermarkMu.Unlock()
+	return n.peerWatermarks[peerID]
+}
+
+// getWatermarkForSync returns the watermark to use for the next sync with a peer.
+// Every FullSyncInterval cycles, returns 0 to force a full sync that catches
+// entries from third parties with timestamps older than the watermark.
+func (n *Node) getWatermarkForSync(peerID peer.ID) int64 {
+	n.watermarkMu.Lock()
+	defer n.watermarkMu.Unlock()
+
+	n.peerSyncCounts[peerID]++
+	if n.peerSyncCounts[peerID] >= FullSyncInterval {
+		n.peerSyncCounts[peerID] = 0
+		return 0 // force full sync
+	}
+	return n.peerWatermarks[peerID]
+}
+
+// setWatermark updates the stored watermark for a peer.
+func (n *Node) setWatermark(peerID peer.ID, watermark int64) {
+	n.watermarkMu.Lock()
+	defer n.watermarkMu.Unlock()
+	n.peerWatermarks[peerID] = watermark
+}
+
+// ResetWatermarks clears all per-peer watermarks, forcing a full sync
+// on the next cycle with every peer. Called on PSK rotation.
+func (n *Node) ResetWatermarks() {
+	n.watermarkMu.Lock()
+	defer n.watermarkMu.Unlock()
+	n.peerWatermarks = make(map[peer.ID]int64)
+	n.peerSyncCounts = make(map[peer.ID]int)
+}
+
 // getPSK returns the current PSK, protected by the read lock.
 func (n *Node) getPSK() []byte {
 	n.pskMu.RLock()
@@ -347,6 +411,9 @@ func (n *Node) UpdatePSK(newPSK []byte) {
 	n.pskMu.Lock()
 	defer n.pskMu.Unlock()
 	n.psk = newPSK
+	// Reset all watermarks — PSK rotation means the security context changed
+	// and we need a full sync to re-verify all entries under the new PSK.
+	n.ResetWatermarks()
 }
 
 // RelayAddrs returns any relay (circuit) addresses the host has acquired.
