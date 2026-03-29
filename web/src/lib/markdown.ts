@@ -1,4 +1,5 @@
 import { Marked } from 'marked';
+import DOMPurify from 'dompurify';
 
 const marked = new Marked({
 	breaks: true,
@@ -8,5 +9,5 @@ const marked = new Marked({
 export function renderMarkdown(content: string): string {
 	const html = marked.parse(content);
 	if (typeof html !== 'string') return content;
-	return html;
+	return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
 }

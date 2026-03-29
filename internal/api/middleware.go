@@ -109,6 +109,12 @@ func authMiddleware(next http.Handler, token string, log *logging.Logger) http.H
 			return
 		}
 
+		// Health endpoint — no auth required for external monitors.
+		if r.URL.Path == "/api/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Skill files are documentation — no auth required.
 		skillPaths := map[string]bool{
 			"/skill.json": true, "/skill.md": true,
