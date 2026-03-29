@@ -189,6 +189,9 @@ func (c *Connector) Start(ctx context.Context) error {
 	// Replay group key distributes (must run after pairwise secrets are established)
 	c.replayGroupKeyDistributes()
 
+	// Backfill FTS index for any messages not yet indexed (H4, M6)
+	c.backfillFTSIndex()
+
 	// Initialize local rate limiter (rule N6)
 	localRate := c.cfg.LocalRateLimit
 	if localRate == 0 {
@@ -451,6 +454,11 @@ func (c *Connector) Bootstrap(platform, workspaceDomain string) error {
 // KeyPair returns the agent's signing keypair.
 func (c *Connector) KeyPair() *crypto.SigningKeyPair {
 	return c.keyPair
+}
+
+// Context returns the connector's lifecycle context, cancelled on shutdown.
+func (c *Connector) Context() context.Context {
+	return c.ctx
 }
 
 // Registry returns the agent registry.

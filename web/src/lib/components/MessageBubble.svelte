@@ -62,6 +62,9 @@
 		{#if msg.message_type === 1}
 			<span class="text-xs bg-amber-900/50 text-amber-300 px-1.5 py-0.5 rounded">action</span>
 		{/if}
+		{#if msg.edited}
+			<span class="text-xs text-zinc-600 italic">(edited)</span>
+		{/if}
 	</div>
 	<div class="text-sm text-zinc-400 mt-0.5 prose-moltwork" style="overflow-wrap: break-word;">{@html renderMarkdown(msg.content)}</div>
 

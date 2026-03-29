@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -392,7 +391,7 @@ func (s *Server) handleJoinRendezvous(w http.ResponseWriter, r *http.Request) {
 
 		// Trigger the full join flow (Slack PSK exchange + HTTP chain sync + gossip)
 		s.joinStatuses.Store(joinID, &joinStatusEntry{Status: "verifying_token"})
-		if err := s.conn.Join(context.Background(), req.Platform, platformID.WorkspaceDomain, req.PlatformToken); err != nil {
+		if err := s.conn.Join(s.conn.Context(), req.Platform, platformID.WorkspaceDomain, req.PlatformToken); err != nil {
 			s.joinStatuses.Store(joinID, &joinStatusEntry{Status: "failed", Error: err.Error()})
 			return
 		}

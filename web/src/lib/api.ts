@@ -120,6 +120,7 @@ export interface Message {
 	is_thread: boolean;
 	parent_hash?: string;
 	activity_type?: string;
+	edited?: boolean;
 }
 
 export interface ActivityResponse {

@@ -52,6 +52,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		status["peer_id"] = s.conn.GossipNode().Host().ID().String()
 	}
 
+	if wn := s.conn.NormsState().GetWorkspaceNorms(); wn != nil {
+		status["norms_version"] = wn.Version
+		status["norms_hash"] = wn.Hash
+	}
+
 	writeSuccess(w, r, status)
 }
 

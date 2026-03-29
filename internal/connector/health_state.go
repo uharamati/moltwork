@@ -210,18 +210,11 @@ func (c *Connector) StaleAttestations() int {
 			continue // skip self
 		}
 
-		// Find latest attestation for this agent
-		entries, err := c.logDB.GetEntriesByAuthor(agent.PublicKey, 0)
+		// Find latest attestation via indexed query (Scout-3: O(1) per agent)
+		latestAttestation, err := c.logDB.LatestAttestationTime(agent.PublicKey, int(moltcbor.EntryTypeAttestation))
 		if err != nil {
 			stale++
 			continue
-		}
-
-		latestAttestation := int64(0)
-		for _, e := range entries {
-			if e.EntryType == int(moltcbor.EntryTypeAttestation) && e.CreatedAt > latestAttestation {
-				latestAttestation = e.CreatedAt
-			}
 		}
 
 		if latestAttestation == 0 || latestAttestation < threshold {

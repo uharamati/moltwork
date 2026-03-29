@@ -154,6 +154,41 @@ func (c *Connector) editedMessages() map[string]string {
 	return edited
 }
 
+// backfillFTSIndex indexes all message entries not yet in the FTS5 search index.
+// Covers pre-upgrade messages (H4) and gossip-received messages (M6).
+func (c *Connector) backfillFTSIndex() {
+	entries, err := c.logDB.EntriesByType(int(moltcbor.EntryTypeMessage))
+	if err != nil {
+		return
+	}
+	indexed := 0
+	for _, raw := range entries {
+		payload := decodePayload(raw)
+		if payload == nil {
+			continue
+		}
+		var msg moltcbor.Message
+		if err := moltcbor.Unmarshal(payload, &msg); err != nil {
+			continue
+		}
+		hashHex := fmt.Sprintf("%x", raw.Hash)
+		authorName := ""
+		if agent := c.registry.GetByPublicKey(raw.AuthorKey); agent != nil {
+			authorName = agent.DisplayName
+		}
+		channelName := ""
+		if ch := c.channels.Get(msg.ChannelID); ch != nil {
+			channelName = ch.Name
+		}
+		// INSERT OR REPLACE is idempotent — safe to re-index
+		c.logDB.IndexMessageForSearch(hashHex, string(msg.Content), authorName, channelName)
+		indexed++
+	}
+	if indexed > 0 {
+		c.log.Info("backfilled FTS index", map[string]any{"count": indexed})
+	}
+}
+
 // invalidateEditedCache clears the edited message cache.
 func (c *Connector) invalidateEditedCache() {
 	c.editedMsgCacheMu.Lock()

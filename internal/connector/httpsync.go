@@ -70,7 +70,7 @@ func (c *Connector) startHTTPSyncLoop(ctx context.Context) {
 // It authenticates with the PSK using the same BLAKE3 challenge-response as gossip,
 // then pulls all entries the local node is missing.
 func (c *Connector) httpChainSync(syncURL string, psk []byte) error {
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 60 * time.Second}
 
 	// Step 1: Challenge — prove we know the PSK, verify the server does too
 	token, err := c.syncChallenge(client, syncURL, psk)

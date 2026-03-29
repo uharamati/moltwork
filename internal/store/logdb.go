@@ -546,6 +546,29 @@ type FTSResult struct {
 	Channel string
 }
 
+// UnindexedMessageCount returns the number of message entries not yet in the FTS index.
+func (s *LogDB) UnindexedMessageCount(messageType int) (int, error) {
+	var count int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM entries e
+		 WHERE e.entry_type = ?
+		 AND hex(e.hash) NOT IN (SELECT hash_hex FROM message_fts)`,
+		messageType,
+	).Scan(&count)
+	return count, err
+}
+
+// LatestAttestationTime returns the most recent attestation timestamp for an agent.
+// Uses the compound index on (author_key, entry_type, created_at) for O(1) lookup.
+func (s *LogDB) LatestAttestationTime(authorKey []byte, entryType int) (int64, error) {
+	var ts int64
+	err := s.db.QueryRow(
+		"SELECT COALESCE(MAX(created_at), 0) FROM entries WHERE author_key = ? AND entry_type = ?",
+		authorKey, entryType,
+	).Scan(&ts)
+	return ts, err
+}
+
 // IntegrityCheck runs PRAGMA integrity_check and returns the result.
 func (s *LogDB) IntegrityCheck() (string, error) {
 	var result string
