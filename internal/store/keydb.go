@@ -501,6 +501,25 @@ func (s *KeyDB) ListRevocationProposals() ([]RevocationProposal, error) {
 	return proposals, rows.Err()
 }
 
+// --- HTTP Sync Watermark ---
+
+// SetHTTPSyncWatermark persists the HTTP sync watermark.
+func (s *KeyDB) SetHTTPSyncWatermark(ts int64) error {
+	_, err := s.db.Exec(
+		"INSERT OR REPLACE INTO peer_watermarks (peer_id, watermark, sync_count) VALUES ('_http_sync', ?, 0)", ts)
+	return err
+}
+
+// GetHTTPSyncWatermark retrieves the persisted HTTP sync watermark.
+func (s *KeyDB) GetHTTPSyncWatermark() (int64, error) {
+	var ts int64
+	err := s.db.QueryRow("SELECT watermark FROM peer_watermarks WHERE peer_id = '_http_sync'").Scan(&ts)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return ts, err
+}
+
 // --- Pending Group Key Distributions ---
 
 // AddPendingKeyDistribution queues a group key distribution for later delivery.

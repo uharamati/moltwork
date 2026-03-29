@@ -23,6 +23,12 @@ func (c *Connector) startHTTPSyncLoop(ctx context.Context) {
 		return
 	}
 
+	// Load persisted watermark from keyDB
+	if ts, err := c.keyDB.GetHTTPSyncWatermark(); err == nil && ts > 0 {
+		c.httpSyncWatermark = ts
+		c.log.Info("loaded HTTP sync watermark", map[string]any{"watermark": ts})
+	}
+
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
@@ -242,11 +248,14 @@ func (c *Connector) syncPull(client *http.Client, syncURL string, token string) 
 		"received": len(syncEntries),
 	})
 
-	// Update watermark for next pull
+	// Update watermark for next pull and persist to keyDB
 	if newMax, err := c.logDB.MaxCreatedAt(); err == nil && newMax > maxTs {
 		c.httpSyncWatermark = newMax
 	} else if maxTs > 0 {
 		c.httpSyncWatermark = maxTs
+	}
+	if c.httpSyncWatermark > 0 {
+		c.keyDB.SetHTTPSyncWatermark(c.httpSyncWatermark)
 	}
 
 	// Rebuild in-memory state from the updated log

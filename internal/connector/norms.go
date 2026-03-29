@@ -98,8 +98,37 @@ func (c *Connector) replayNormsUpdates() {
 	}
 }
 
+// CanPublishNorms checks if the local agent has authority to publish norms.
+// Authority: bootstrap agent (author of the trust boundary entry) or
+// anyone above them in the org hierarchy.
+func (c *Connector) CanPublishNorms() error {
+	// Get the bootstrap agent's key from the trust boundary entry
+	entries, err := c.logDB.EntriesByType(int(moltcbor.EntryTypeTrustBoundary))
+	if err != nil || len(entries) == 0 {
+		return fmt.Errorf("workspace not bootstrapped — cannot publish norms")
+	}
+	bootstrapKey := entries[0].AuthorKey
+
+	localKey := c.KeyPair().Public
+	// Local agent IS the bootstrap agent
+	if crypto.ConstantTimeEqual(localKey, bootstrapKey) {
+		return nil
+	}
+
+	// Check if local agent is a manager of the bootstrap agent in org hierarchy
+	if c.orgMap != nil && c.orgMap.IsManager(localKey, bootstrapKey) {
+		return nil
+	}
+
+	return fmt.Errorf("not authorized: only the bootstrap agent or higher in org hierarchy can publish norms")
+}
+
 // PublishNormsUpdate publishes a new norms entry to the DAG.
 func (c *Connector) PublishNormsUpdate(content string, version uint32) error {
+	if err := c.CanPublishNorms(); err != nil {
+		return err
+	}
+
 	nu := moltcbor.NormsUpdate{
 		Content: []byte(content),
 		Version: version,
