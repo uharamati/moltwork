@@ -94,6 +94,16 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 		agentMap[fmt.Sprintf("%x", a.PublicKey)] = a
 	}
 
+	// Build last-message-at map with a single scan instead of N queries (M1)
+	lastMsgMap := make(map[string]int64)
+	if allMsgs, err := s.conn.GetNewActivity(0, 10000); err == nil {
+		for _, m := range allMsgs {
+			if m.Timestamp > lastMsgMap[m.ChannelID] {
+				lastMsgMap[m.ChannelID] = m.Timestamp
+			}
+		}
+	}
+
 	result := make([]map[string]any, 0, len(channels))
 	for _, ch := range channels {
 		// Resolve member public keys to display names
@@ -120,16 +130,9 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 			adminKeys = append(adminKeys, keyHex)
 		}
 
-		// Get last message timestamp for this channel
-		lastMsgAt := int64(0)
-		if msgs, err := s.conn.GetMessages(fmt.Sprintf("%x", ch.ID), 0, 1); err == nil && len(msgs) > 0 {
-			// Messages are sorted by time — last one has the latest timestamp
-			for _, m := range msgs {
-				if m.Timestamp > lastMsgAt {
-					lastMsgAt = m.Timestamp
-				}
-			}
-		}
+		// Get last message timestamp from pre-built map (M1: single scan instead of N queries)
+		chIDHex := fmt.Sprintf("%x", ch.ID)
+		lastMsgAt := lastMsgMap[chIDHex]
 
 		result = append(result, map[string]any{
 			"id":              fmt.Sprintf("%x", ch.ID),
@@ -437,9 +440,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		for _, r := range ftsResults {
 			results = append(results, map[string]any{
 				"hash":         r.HashHex,
+				"channel_id":   r.ChannelID,
 				"channel_name": r.Channel,
 				"author_name":  r.Author,
 				"content":      r.Content,
+				"timestamp":    r.Timestamp,
 			})
 		}
 		writeSuccess(w, r, results)

@@ -181,7 +181,8 @@ func (c *Connector) backfillFTSIndex() {
 			channelName = ch.Name
 		}
 		// INSERT OR REPLACE is idempotent — safe to re-index
-		c.logDB.IndexMessageForSearch(hashHex, string(msg.Content), authorName, channelName)
+		channelIDHex := fmt.Sprintf("%x", msg.ChannelID)
+		c.logDB.IndexMessageForSearch(hashHex, string(msg.Content), authorName, channelName, channelIDHex, raw.CreatedAt)
 		indexed++
 	}
 	if indexed > 0 {
@@ -875,7 +876,7 @@ func (c *Connector) decodeMessageEntry(raw *store.RawEntry, filterChannelID []by
 
 	// Index for full-text search (best-effort, non-blocking)
 	if content != "" {
-		c.logDB.IndexMessageForSearch(decoded.Hash, content, authorName, channelName)
+		c.logDB.IndexMessageForSearch(decoded.Hash, content, authorName, channelName, decoded.ChannelID, raw.CreatedAt)
 	}
 
 	return decoded

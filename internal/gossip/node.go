@@ -48,6 +48,10 @@ type Node struct {
 	peerLastSeen     map[peer.ID]time.Time // last successful sync time per peer
 	lastPeerEviction time.Time             // last time stale peers were evicted
 
+	// Per-peer connect failure tracking for exponential backoff (L3)
+	peerFailures   map[peer.ID]int       // consecutive failure count
+	peerNextRetry  map[peer.ID]time.Time // earliest next retry time
+
 	minPeers int // minimum peer count before warning
 
 	// Rate-limit peer count warnings
@@ -127,6 +131,8 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 		peerWatermarks: make(map[peer.ID]int64),
 		peerSyncCounts: make(map[peer.ID]int),
 		peerLastSeen:   make(map[peer.ID]time.Time),
+		peerFailures:   make(map[peer.ID]int),
+		peerNextRetry:  make(map[peer.ID]time.Time),
 		ctx:            ctx,
 		cancel:         cancel,
 	}
@@ -292,8 +298,13 @@ func (n *Node) syncWithPeers() {
 			continue
 		}
 
-		// Check if already syncing with this peer (prevents duplicate concurrent syncs)
+		// Exponential backoff for peers that recently failed to connect (L3)
 		n.peerSyncMu.Lock()
+		if retryAt, ok := n.peerNextRetry[pi.ID]; ok && time.Now().Before(retryAt) {
+			n.peerSyncMu.Unlock()
+			continue
+		}
+		// Check if already syncing with this peer (prevents duplicate concurrent syncs)
 		if n.activePeers[pi.ID] {
 			n.peerSyncMu.Unlock()
 			continue
@@ -324,9 +335,21 @@ func (n *Node) syncWithPeers() {
 				defer connectCancel()
 				if err := n.host.Connect(connectCtx, pi); err != nil {
 					n.log.Debug("connect failed", map[string]any{"peer": pi.ID.String(), "error": err.Error()})
+					// Record failure and compute backoff (L3)
+					n.peerSyncMu.Lock()
+					n.peerFailures[pi.ID]++
+					failures := n.peerFailures[pi.ID]
+					backoff := time.Duration(1<<min(failures, 8)) * 10 * time.Second // 10s, 20s, 40s, ... cap 2560s (~42m)
+					n.peerNextRetry[pi.ID] = time.Now().Add(backoff)
+					n.peerSyncMu.Unlock()
 					return
 				}
 			}
+			// Reset failure count on successful connect
+			n.peerSyncMu.Lock()
+			delete(n.peerFailures, pi.ID)
+			delete(n.peerNextRetry, pi.ID)
+			n.peerSyncMu.Unlock()
 
 			// Determine watermark: use incremental sync unless it's time
 			// for a periodic full sync to catch third-party stragglers.

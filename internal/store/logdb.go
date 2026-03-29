@@ -102,6 +102,20 @@ func (s *LogDB) migrate() error {
 	if err != nil {
 		return fmt.Errorf("migrate log db: %w", err)
 	}
+
+	// Migration v2: add channel_id and timestamp to FTS index (M7, L2).
+	// FTS5 tables can't be ALTERed — drop and recreate with new columns.
+	// The backfillFTSIndex on startup will repopulate.
+	var version int
+	s.db.QueryRow("SELECT version FROM schema_version WHERE id = 1").Scan(&version)
+	if version < 2 {
+		s.db.Exec("DROP TABLE IF EXISTS message_fts")
+		s.db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(
+			hash_hex, content, author, channel, channel_id UNINDEXED, timestamp UNINDEXED
+		)`)
+		s.db.Exec("UPDATE schema_version SET version = 2 WHERE id = 1")
+	}
+
 	return nil
 }
 
@@ -493,10 +507,10 @@ func (s *LogDB) IsEntryRejected(hash []byte) (bool, error) {
 
 // IndexMessageForSearch adds a decoded message to the FTS5 search index.
 // Called by the connector after decoding message entries.
-func (s *LogDB) IndexMessageForSearch(hashHex, content, author, channel string) error {
+func (s *LogDB) IndexMessageForSearch(hashHex, content, author, channel, channelID string, timestamp int64) error {
 	_, err := s.db.Exec(
-		"INSERT OR REPLACE INTO message_fts (hash_hex, content, author, channel) VALUES (?, ?, ?, ?)",
-		hashHex, content, author, channel,
+		"INSERT OR REPLACE INTO message_fts (hash_hex, content, author, channel, channel_id, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+		hashHex, content, author, channel, channelID, timestamp,
 	)
 	return err
 }
@@ -519,7 +533,7 @@ func (s *LogDB) UpdateMessageSearchContent(hashHex, newContent string) error {
 // SearchFTS performs a full-text search across all indexed messages.
 func (s *LogDB) SearchFTS(query string, limit int) ([]FTSResult, error) {
 	rows, err := s.db.Query(
-		"SELECT hash_hex, content, author, channel FROM message_fts WHERE message_fts MATCH ? LIMIT ?",
+		"SELECT hash_hex, content, author, channel, channel_id, timestamp FROM message_fts WHERE message_fts MATCH ? ORDER BY timestamp DESC LIMIT ?",
 		query, limit,
 	)
 	if err != nil {
@@ -530,7 +544,7 @@ func (s *LogDB) SearchFTS(query string, limit int) ([]FTSResult, error) {
 	var results []FTSResult
 	for rows.Next() {
 		var r FTSResult
-		if err := rows.Scan(&r.HashHex, &r.Content, &r.Author, &r.Channel); err != nil {
+		if err := rows.Scan(&r.HashHex, &r.Content, &r.Author, &r.Channel, &r.ChannelID, &r.Timestamp); err != nil {
 			return nil, fmt.Errorf("scan fts: %w", err)
 		}
 		results = append(results, r)
@@ -540,10 +554,12 @@ func (s *LogDB) SearchFTS(query string, limit int) ([]FTSResult, error) {
 
 // FTSResult is a search result from the full-text index.
 type FTSResult struct {
-	HashHex string
-	Content string
-	Author  string
-	Channel string
+	HashHex   string
+	Content   string
+	Author    string
+	Channel   string
+	ChannelID string
+	Timestamp int64
 }
 
 // UnindexedMessageCount returns the number of message entries not yet in the FTS index.
