@@ -18,6 +18,9 @@ const (
 var (
 	encMode cbor.EncMode
 	decMode cbor.DecMode
+	// internalDecMode is a relaxed decoder for gossip/internal protocol messages
+	// (e.g., hash set arrays) that can exceed user-facing size limits.
+	internalDecMode cbor.DecMode
 )
 
 func init() {
@@ -46,6 +49,21 @@ func init() {
 	if err != nil {
 		panic("cbor dec mode: " + err.Error())
 	}
+
+	// Internal decoder: same strictness but allows large arrays for gossip
+	// hash set exchange (workspaces with >1000 entries are common).
+	internalDecOpts := cbor.DecOptions{
+		DupMapKey:         cbor.DupMapKeyEnforcedAPF,
+		MaxNestedLevels:   MaxNestingDepth,
+		MaxArrayElements:  10_000_000,
+		MaxMapPairs:       500,
+		IndefLength:       cbor.IndefLengthForbidden,
+		ExtraReturnErrors: cbor.ExtraDecErrorUnknownField,
+	}
+	internalDecMode, err = internalDecOpts.DecMode()
+	if err != nil {
+		panic("cbor internal dec mode: " + err.Error())
+	}
 }
 
 // Marshal encodes a value to canonical CBOR.
@@ -65,6 +83,16 @@ func Unmarshal(data []byte, v any) error {
 	}
 	if err := decMode.Unmarshal(data, v); err != nil {
 		return fmt.Errorf("cbor unmarshal: %w", err)
+	}
+	return nil
+}
+
+// UnmarshalInternal decodes CBOR data using the internal decoder with relaxed
+// array limits. Use this for gossip protocol messages (hash sets, sync entries)
+// that can legitimately contain large arrays. NOT for user-facing payloads.
+func UnmarshalInternal(data []byte, v any) error {
+	if err := internalDecMode.Unmarshal(data, v); err != nil {
+		return fmt.Errorf("cbor unmarshal internal: %w", err)
 	}
 	return nil
 }

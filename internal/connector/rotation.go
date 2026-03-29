@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"time"
 
 	moltcbor "moltwork/internal/cbor"
@@ -15,6 +16,15 @@ func (c *Connector) startPairwiseRotation(ctx context.Context) {
 	interval := time.Duration(c.cfg.KeyRotationInterval) * time.Second
 	if interval == 0 {
 		interval = 24 * time.Hour // default: 1 day
+	}
+
+	// Jitter before starting: spread out rotation checks across agents
+	// that joined at the same time to avoid thundering herd on the ticker.
+	jitter := time.Duration(rand.Int63n(int64(5 * time.Minute)))
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(jitter):
 	}
 
 	// Check every 10 minutes if any peers need rotation

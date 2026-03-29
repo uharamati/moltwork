@@ -133,7 +133,7 @@ func HandleIncomingSync(s network.Stream, logDB *store.LogDB, psk []byte, valida
 	}
 
 	var theirHashes HashSetMsg
-	if err := moltcbor.Unmarshal(payload, &theirHashes); err != nil {
+	if err := moltcbor.UnmarshalInternal(payload, &theirHashes); err != nil {
 		log.Warn("decode hash set", map[string]any{"peer": remotePeer.String(), "error": err.Error()})
 		return
 	}
@@ -260,7 +260,7 @@ func HandleIncomingSync(s network.Stream, logDB *store.LogDB, psk []byte, valida
 		}
 		if msgType == MsgTypeEntries {
 			var incoming EntriesMsg
-			if err := moltcbor.Unmarshal(payload, &incoming); err != nil {
+			if err := moltcbor.UnmarshalInternal(payload, &incoming); err != nil {
 				log.Warn("decode entries", map[string]any{"error": err.Error()})
 				break
 			}
@@ -302,7 +302,7 @@ func InitiateSync(s network.Stream, logDB *store.LogDB, psk []byte, validator Ag
 	}
 
 	var theirHashes HashSetMsg
-	if err := moltcbor.Unmarshal(payload, &theirHashes); err != nil {
+	if err := moltcbor.UnmarshalInternal(payload, &theirHashes); err != nil {
 		return fmt.Errorf("decode their hashes: %w", err)
 	}
 
@@ -361,7 +361,7 @@ func InitiateSync(s network.Stream, logDB *store.LogDB, psk []byte, validator Ag
 		}
 		if msgType == MsgTypeEntries {
 			var incoming EntriesMsg
-			if err := moltcbor.Unmarshal(payload, &incoming); err != nil {
+			if err := moltcbor.UnmarshalInternal(payload, &incoming); err != nil {
 				return fmt.Errorf("decode entries: %w", err)
 			}
 			StoreEntries(logDB, incoming.Entries, validator, log)

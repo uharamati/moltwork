@@ -164,12 +164,14 @@ func (c *Connector) replayChannelState() {
 		}
 	}
 
-	// Permanent channels: all registered agents are members automatically
+	// Permanent channels: all non-revoked registered agents are members automatically
 	allAgents := c.registry.All()
 	for _, ch := range c.channels.All() {
 		if ch.Type == moltcbor.ChannelTypePermanent {
 			for _, agent := range allAgents {
-				ch.AddMember(agent.PublicKey)
+				if !agent.Revoked {
+					ch.AddMember(agent.PublicKey)
+				}
 			}
 		}
 	}

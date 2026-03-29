@@ -399,6 +399,11 @@ func (c *Connector) watchJoinRequests(ctx context.Context, rv rendezvous.Provide
 	}
 
 	for req := range requests {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		c.handleJoinRequest(ctx, rv, req)
 	}
 }
