@@ -76,6 +76,14 @@ type Connector struct {
 	// Workspace norms state
 	normsState NormsState
 
+	// Integrity check cache — per-instance instead of package-level (M9)
+	logDBIntegrityResult string
+	logDBIntegrityTime   time.Time
+	logDBIntegrityMu     sync.Mutex
+	keyDBIntegrityResult string
+	keyDBIntegrityTime   time.Time
+	keyDBIntegrityMu     sync.Mutex
+
 	// Subscriber notification: broadcast when new entries arrive via gossip or local publish.
 	// API handlers (SSE, long-polling) subscribe to get notified of new data.
 	subMu       sync.Mutex

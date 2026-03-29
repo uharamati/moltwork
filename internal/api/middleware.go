@@ -202,9 +202,10 @@ func correlationMiddleware(next http.Handler) http.Handler {
 // securityHeaders adds required security headers (rules F2, F3, F6).
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// CSP (rule F2)
+		// CSP (rule F2). unsafe-inline in style-src is required by Svelte/Tailwind v4
+		// which generates inline styles for scoped components and CSS custom properties.
 		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'")
+			"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'")
 
 		// No CORS — deny all cross-origin (rule F3)
 		// Don't set Access-Control-Allow-Origin at all

@@ -3,7 +3,6 @@ package connector
 import (
 	"fmt"
 	"os"
-	"sync"
 	"time"
 
 	moltcbor "moltwork/internal/cbor"
@@ -90,35 +89,25 @@ func (c *Connector) OverdueRotations() int {
 	return len(peers)
 }
 
-// Cached integrity check results — recomputed every 6 hours.
-var (
-	logDBIntegrityResult string
-	logDBIntegrityTime   time.Time
-	logDBIntegrityMu     sync.Mutex
-	keyDBIntegrityResult string
-	keyDBIntegrityTime   time.Time
-	keyDBIntegrityMu     sync.Mutex
-)
-
 const integrityCheckInterval = 6 * time.Hour
 
 func (c *Connector) LogDBIntegrity() string {
 	if c.logDB == nil {
 		return "failed"
 	}
-	logDBIntegrityMu.Lock()
-	defer logDBIntegrityMu.Unlock()
-	if time.Since(logDBIntegrityTime) < integrityCheckInterval && logDBIntegrityResult != "" {
-		return logDBIntegrityResult
+	c.logDBIntegrityMu.Lock()
+	defer c.logDBIntegrityMu.Unlock()
+	if time.Since(c.logDBIntegrityTime) < integrityCheckInterval && c.logDBIntegrityResult != "" {
+		return c.logDBIntegrityResult
 	}
 	result, err := c.logDB.IntegrityCheck()
 	if err != nil {
-		logDBIntegrityResult = "failed"
+		c.logDBIntegrityResult = "failed"
 	} else {
-		logDBIntegrityResult = result
+		c.logDBIntegrityResult = result
 	}
-	logDBIntegrityTime = time.Now()
-	return logDBIntegrityResult
+	c.logDBIntegrityTime = time.Now()
+	return c.logDBIntegrityResult
 }
 
 func (c *Connector) LogDBSizeBytes() int64 {
@@ -152,19 +141,19 @@ func (c *Connector) KeyDBIntegrity() string {
 	if c.keyDB == nil {
 		return "failed"
 	}
-	keyDBIntegrityMu.Lock()
-	defer keyDBIntegrityMu.Unlock()
-	if time.Since(keyDBIntegrityTime) < integrityCheckInterval && keyDBIntegrityResult != "" {
-		return keyDBIntegrityResult
+	c.keyDBIntegrityMu.Lock()
+	defer c.keyDBIntegrityMu.Unlock()
+	if time.Since(c.keyDBIntegrityTime) < integrityCheckInterval && c.keyDBIntegrityResult != "" {
+		return c.keyDBIntegrityResult
 	}
 	result, err := c.keyDB.IntegrityCheck()
 	if err != nil {
-		keyDBIntegrityResult = "failed"
+		c.keyDBIntegrityResult = "failed"
 	} else {
-		keyDBIntegrityResult = result
+		c.keyDBIntegrityResult = result
 	}
-	keyDBIntegrityTime = time.Now()
-	return keyDBIntegrityResult
+	c.keyDBIntegrityTime = time.Now()
+	return c.keyDBIntegrityResult
 }
 
 func (c *Connector) KeyDBSizeBytes() int64 {

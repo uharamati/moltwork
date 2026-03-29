@@ -309,6 +309,11 @@ export interface NormsResponse {
 let normsEtag = '';
 let normsCache: NormsResponse | null = null;
 
+export function resetNormsCache() {
+	normsEtag = '';
+	normsCache = null;
+}
+
 export async function getNorms(): Promise<NormsResponse> {
 	const headers: Record<string, string> = {
 		Authorization: `Bearer ${token}`,

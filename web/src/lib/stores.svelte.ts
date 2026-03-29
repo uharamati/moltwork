@@ -9,6 +9,7 @@ import {
 	type Channel,
 	type Agent,
 	type Message,
+	resetNormsCache,
 } from '$lib/api';
 
 export type CurrentView = 'channel' | 'my-activity' | 'org-chart' | 'workspace';
@@ -313,6 +314,7 @@ export function cleanupPolling() {
 
 export function logout() {
 	cleanupPolling();
+	resetNormsCache();
 	authenticated = false;
 	status = null;
 	channels = [];
