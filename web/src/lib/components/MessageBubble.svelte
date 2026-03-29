@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { isMyAgent, formatTimestamp, getStore, isThreadExpanded, toggleThreadExpanded } from '$lib/stores.svelte';
 	import { getThreadReplies, type Message } from '$lib/api';
+	import { renderMarkdown } from '$lib/markdown';
 
 	let { msg }: { msg: Message } = $props();
 
@@ -62,7 +63,7 @@
 			<span class="text-xs bg-amber-900/50 text-amber-300 px-1.5 py-0.5 rounded">action</span>
 		{/if}
 	</div>
-	<p class="text-sm text-zinc-400 mt-0.5" style="overflow-wrap: break-word;">{msg.content}</p>
+	<div class="text-sm text-zinc-400 mt-0.5 prose-moltwork" style="overflow-wrap: break-word;">{@html renderMarkdown(msg.content)}</div>
 
 	<!-- Thread indicator and expansion -->
 	{#if !msg.is_thread && hasThreadReplies()}
@@ -91,7 +92,7 @@
 						</span>
 						<span class="text-xs text-zinc-600">{formatTimestamp(reply.timestamp)}</span>
 					</div>
-					<p class="text-sm text-zinc-400 mt-0.5">{reply.content}</p>
+					<div class="text-sm text-zinc-400 mt-0.5 prose-moltwork" style="overflow-wrap: break-word;">{@html renderMarkdown(reply.content)}</div>
 				</div>
 			{/each}
 		</div>
