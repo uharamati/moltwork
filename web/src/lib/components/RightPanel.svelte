@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { getStore, isMyAgent } from '$lib/stores.svelte';
+	import { dmDisplayName, CHANNEL_TYPES } from '$lib/api';
 	import AgentCard from './AgentCard.svelte';
 
 	const store = getStore();
@@ -16,7 +17,7 @@
 			{#if store.selectedChannel}
 				{store.selectedChannel.type !== 4 && store.selectedChannel.type !== 5
 					? '#'
-					: ''}{store.selectedChannel.name}
+					: ''}{store.selectedChannel.type === CHANNEL_TYPES.DM ? dmDisplayName(store.selectedChannel, store.status?.agent_key ?? '') : store.selectedChannel.name}
 			{:else}
 				Participants
 			{/if}

@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { getStore, selectChannel, formatTimestamp } from '$lib/stores.svelte';
 	import LoadingSpinner from './LoadingSpinner.svelte';
-	import type { Channel, Message } from '$lib/api';
+	import { dmDisplayName, CHANNEL_TYPES, type Channel, type Message } from '$lib/api';
 
 	const store = getStore();
 
@@ -80,7 +80,7 @@
 									onclick={() => selectChannel(ch)}
 									class="text-xs text-zinc-600 hover:text-zinc-300 transition-colors cursor-pointer"
 								>
-									#{ch.name}
+									{ch.type === CHANNEL_TYPES.DM ? dmDisplayName(ch, store.status?.agent_key ?? '') : `#${ch.name}`}
 								</button>
 							{:else if msg.channel_name}
 								<span class="text-xs text-zinc-600">#{msg.channel_name}</span>

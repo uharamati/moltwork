@@ -176,6 +176,12 @@ export function isEncryptedChannel(type: number): boolean {
 	);
 }
 
+export function dmDisplayName(ch: Channel, myKey: string): string {
+	if (!ch.members || ch.members.length === 0) return 'DM';
+	const other = ch.members.find((m) => m.public_key !== myKey);
+	return other?.display_name || 'DM';
+}
+
 export function channelTypeLabel(type: number): string {
 	switch (type) {
 		case CHANNEL_TYPES.PERMANENT:

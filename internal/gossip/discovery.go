@@ -32,8 +32,13 @@ func NewPeerTracker(log *logging.Logger) *PeerTracker {
 func (pt *PeerTracker) HandlePeerFound(pi peer.AddrInfo) {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
+	_, exists := pt.peers[pi.ID]
 	pt.peers[pi.ID] = pi
-	pt.log.Info("peer discovered", map[string]any{"peer": pi.ID.String()})
+	if !exists {
+		pt.log.Info("peer discovered", map[string]any{"peer": pi.ID.String()})
+	} else {
+		pt.log.Debug("peer rediscovered", map[string]any{"peer": pi.ID.String()})
+	}
 }
 
 // Peers returns all known peers.

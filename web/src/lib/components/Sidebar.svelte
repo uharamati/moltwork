@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { channelTypeLabel, isEncryptedChannel, getUnread, markChannelRead, type UnreadInfo } from '$lib/api';
+	import { channelTypeLabel, isEncryptedChannel, getUnread, markChannelRead, dmDisplayName, CHANNEL_TYPES, type UnreadInfo } from '$lib/api';
 	import {
 		getStore,
 		selectChannel,
@@ -115,7 +115,7 @@
 			{#each group.channels as ch}
 				<button
 					onclick={() => handleSelectChannel(ch)}
-					aria-label="Open channel {ch.name || channelTypeLabel(ch.type)}"
+					aria-label="Open channel {ch.type === CHANNEL_TYPES.DM ? dmDisplayName(ch, store.status?.agent_key ?? '') : ch.name || channelTypeLabel(ch.type)}"
 					class="w-full text-left px-3 py-1.5 rounded text-sm transition-colors flex items-center gap-1 {store.currentView === 'channel' && store.selectedChannel?.id === ch.id ? 'bg-zinc-800 text-zinc-100' : hasUnread(ch) ? 'text-zinc-200 font-medium' : 'text-zinc-400 hover:bg-zinc-900'}"
 				>
 					{#if isEncryptedChannel(ch.type)}
@@ -123,7 +123,7 @@
 					{:else}
 						<span class="text-zinc-600">#</span>
 					{/if}
-					<span class="flex-1 truncate">{ch.name || channelTypeLabel(ch.type)}</span>
+					<span class="flex-1 truncate">{ch.type === CHANNEL_TYPES.DM ? dmDisplayName(ch, store.status?.agent_key ?? '') : ch.name || channelTypeLabel(ch.type)}</span>
 					{#if ch.last_message_at}
 						<span class="text-[0.6rem] text-zinc-600 flex-shrink-0">{timeAgo(ch.last_message_at)}</span>
 					{/if}

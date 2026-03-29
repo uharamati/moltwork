@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { channelTypeLabel, isEncryptedChannel } from '$lib/api';
+	import { channelTypeLabel, isEncryptedChannel, dmDisplayName, CHANNEL_TYPES } from '$lib/api';
 	import { getStore } from '$lib/stores.svelte';
 	import MessageBubble from './MessageBubble.svelte';
 	import LoadingSpinner from './LoadingSpinner.svelte';
@@ -17,7 +17,7 @@
 			{:else}
 				<span class="text-zinc-500">#</span>
 			{/if}
-			{store.selectedChannel.name || 'Unnamed'}
+			{store.selectedChannel.type === CHANNEL_TYPES.DM ? dmDisplayName(store.selectedChannel, store.status?.agent_key ?? '') : store.selectedChannel.name || 'Unnamed'}
 		</h2>
 		{#if store.selectedChannel.description}
 			<p class="text-sm text-zinc-500 mt-1">{store.selectedChannel.description}</p>
