@@ -3,7 +3,10 @@ package connector
 import (
 	"fmt"
 	"os"
+	"sync"
 	"time"
+
+	moltcbor "moltwork/internal/cbor"
 )
 
 // Health state methods implement the health.ConnectorState interface.
@@ -87,11 +90,35 @@ func (c *Connector) OverdueRotations() int {
 	return len(peers)
 }
 
+// Cached integrity check results — recomputed every 6 hours.
+var (
+	logDBIntegrityResult string
+	logDBIntegrityTime   time.Time
+	logDBIntegrityMu     sync.Mutex
+	keyDBIntegrityResult string
+	keyDBIntegrityTime   time.Time
+	keyDBIntegrityMu     sync.Mutex
+)
+
+const integrityCheckInterval = 6 * time.Hour
+
 func (c *Connector) LogDBIntegrity() string {
 	if c.logDB == nil {
 		return "failed"
 	}
-	return "ok" // integrity check runs at startup (S4), future: periodic recheck
+	logDBIntegrityMu.Lock()
+	defer logDBIntegrityMu.Unlock()
+	if time.Since(logDBIntegrityTime) < integrityCheckInterval && logDBIntegrityResult != "" {
+		return logDBIntegrityResult
+	}
+	result, err := c.logDB.IntegrityCheck()
+	if err != nil {
+		logDBIntegrityResult = "failed"
+	} else {
+		logDBIntegrityResult = result
+	}
+	logDBIntegrityTime = time.Now()
+	return logDBIntegrityResult
 }
 
 func (c *Connector) LogDBSizeBytes() int64 {
@@ -125,7 +152,19 @@ func (c *Connector) KeyDBIntegrity() string {
 	if c.keyDB == nil {
 		return "failed"
 	}
-	return "ok"
+	keyDBIntegrityMu.Lock()
+	defer keyDBIntegrityMu.Unlock()
+	if time.Since(keyDBIntegrityTime) < integrityCheckInterval && keyDBIntegrityResult != "" {
+		return keyDBIntegrityResult
+	}
+	result, err := c.keyDB.IntegrityCheck()
+	if err != nil {
+		keyDBIntegrityResult = "failed"
+	} else {
+		keyDBIntegrityResult = result
+	}
+	keyDBIntegrityTime = time.Now()
+	return keyDBIntegrityResult
 }
 
 func (c *Connector) KeyDBSizeBytes() int64 {
@@ -159,8 +198,38 @@ func (c *Connector) RevokedAgentCount() int {
 }
 
 func (c *Connector) StaleAttestations() int {
-	// Future: track per-agent attestation freshness
-	return 0
+	interval := c.AttestationInterval()
+	threshold := time.Now().Add(-interval).Unix()
+	stale := 0
+
+	for _, agent := range c.registry.All() {
+		if agent.Revoked {
+			continue
+		}
+		if c.keyPair != nil && string(agent.PublicKey) == string(c.keyPair.Public) {
+			continue // skip self
+		}
+
+		// Find latest attestation for this agent
+		entries, err := c.logDB.GetEntriesByAuthor(agent.PublicKey, 0)
+		if err != nil {
+			stale++
+			continue
+		}
+
+		latestAttestation := int64(0)
+		for _, e := range entries {
+			if e.EntryType == int(moltcbor.EntryTypeAttestation) && e.CreatedAt > latestAttestation {
+				latestAttestation = e.CreatedAt
+			}
+		}
+
+		if latestAttestation == 0 || latestAttestation < threshold {
+			stale++
+		}
+	}
+
+	return stale
 }
 
 func (c *Connector) SelfRegistered() bool {

@@ -423,8 +423,24 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Search across recent activity. Cap at 10K to keep memory bounded
-	// while providing a reasonable search window.
+	// Try FTS5 full-text search first — scales to any log size.
+	// Falls back to in-memory scan if FTS index is empty (first run before indexing).
+	ftsResults, ftsErr := s.conn.LogDB().SearchFTS(query, limit)
+	if ftsErr == nil && len(ftsResults) > 0 {
+		results := make([]map[string]any, 0, len(ftsResults))
+		for _, r := range ftsResults {
+			results = append(results, map[string]any{
+				"hash":         r.HashHex,
+				"channel_name": r.Channel,
+				"author_name":  r.Author,
+				"content":      r.Content,
+			})
+		}
+		writeSuccess(w, r, results)
+		return
+	}
+
+	// Fallback: scan recent activity (capped at 10K for memory safety)
 	allMsgs, err := s.conn.GetNewActivity(0, 10000)
 	if err != nil {
 		writeError(w, r, err, 500)

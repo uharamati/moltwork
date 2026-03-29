@@ -94,6 +94,10 @@ func (s *LogDB) migrate() error {
 			hash   BLOB PRIMARY KEY,
 			reason TEXT NOT NULL
 		);
+
+		CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(
+			hash_hex, content, author, channel
+		);
 	`)
 	if err != nil {
 		return fmt.Errorf("migrate log db: %w", err)
@@ -485,6 +489,53 @@ func (s *LogDB) IsEntryRejected(hash []byte) (bool, error) {
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// IndexMessageForSearch adds a decoded message to the FTS5 search index.
+// Called by the connector after decoding message entries.
+func (s *LogDB) IndexMessageForSearch(hashHex, content, author, channel string) error {
+	_, err := s.db.Exec(
+		"INSERT OR REPLACE INTO message_fts (hash_hex, content, author, channel) VALUES (?, ?, ?, ?)",
+		hashHex, content, author, channel,
+	)
+	return err
+}
+
+// SearchFTS performs a full-text search across all indexed messages.
+func (s *LogDB) SearchFTS(query string, limit int) ([]FTSResult, error) {
+	rows, err := s.db.Query(
+		"SELECT hash_hex, content, author, channel FROM message_fts WHERE message_fts MATCH ? LIMIT ?",
+		query, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("fts search: %w", err)
+	}
+	defer rows.Close()
+
+	var results []FTSResult
+	for rows.Next() {
+		var r FTSResult
+		if err := rows.Scan(&r.HashHex, &r.Content, &r.Author, &r.Channel); err != nil {
+			return nil, fmt.Errorf("scan fts: %w", err)
+		}
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
+// FTSResult is a search result from the full-text index.
+type FTSResult struct {
+	HashHex string
+	Content string
+	Author  string
+	Channel string
+}
+
+// IntegrityCheck runs PRAGMA integrity_check and returns the result.
+func (s *LogDB) IntegrityCheck() (string, error) {
+	var result string
+	err := s.db.QueryRow("PRAGMA integrity_check").Scan(&result)
+	return result, err
 }
 
 // Close closes the database.

@@ -299,8 +299,31 @@ export interface NormsResponse {
 	};
 }
 
+let normsEtag = '';
+let normsCache: NormsResponse | null = null;
+
 export async function getNorms(): Promise<NormsResponse> {
-	return fetchAPI<NormsResponse>('/api/norms');
+	const headers: Record<string, string> = {
+		Authorization: `Bearer ${token}`,
+	};
+	if (normsEtag) {
+		headers['If-None-Match'] = normsEtag;
+	}
+
+	const resp = await fetch(`${API_BASE}/api/norms`, { headers });
+	if (resp.status === 304 && normsCache) {
+		return normsCache;
+	}
+	if (!resp.ok) {
+		throw new APIError('Failed to fetch norms', resp.status);
+	}
+
+	const etag = resp.headers.get('ETag');
+	if (etag) normsEtag = etag;
+
+	const data = await resp.json();
+	normsCache = data.result ?? data;
+	return normsCache!;
 }
 
 export async function markChannelRead(channelId: string, messageHash: string, timestamp: number): Promise<void> {

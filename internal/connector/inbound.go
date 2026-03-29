@@ -822,7 +822,7 @@ func (c *Connector) decodeMessageEntry(raw *store.RawEntry, filterChannelID []by
 	// Decrypt content based on channel type
 	content := c.decryptMessageContent(msg.ChannelID, msg.Content, ch, raw.AuthorKey)
 
-	return &DecodedMessage{
+	decoded := &DecodedMessage{
 		Hash:         hex.EncodeToString(raw.Hash),
 		ChannelID:    hex.EncodeToString(msg.ChannelID),
 		ChannelName:  channelName,
@@ -833,6 +833,13 @@ func (c *Connector) decodeMessageEntry(raw *store.RawEntry, filterChannelID []by
 		Timestamp:    raw.CreatedAt,
 		ActivityType: "message",
 	}
+
+	// Index for full-text search (best-effort, non-blocking)
+	if content != "" {
+		c.logDB.IndexMessageForSearch(decoded.Hash, content, authorName, channelName)
+	}
+
+	return decoded
 }
 
 // decryptMessageContent decrypts message content based on channel type.

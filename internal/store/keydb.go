@@ -205,6 +205,15 @@ func (s *KeyDB) migrate() error {
 		return fmt.Errorf("create pending_key_distributions: %w", err)
 	}
 
+	// DM rate limits — persisted so rate limiting survives restarts
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS dm_rate_limits (
+		recipient_key TEXT PRIMARY KEY,
+		send_count    INTEGER NOT NULL DEFAULT 0,
+		window_start  INTEGER NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("create dm_rate_limits: %w", err)
+	}
+
 	// Gossip sync watermarks — persisted per-peer so incremental sync survives restarts
 	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS peer_watermarks (
 		peer_id    TEXT PRIMARY KEY,
@@ -501,6 +510,36 @@ func (s *KeyDB) ListRevocationProposals() ([]RevocationProposal, error) {
 	return proposals, rows.Err()
 }
 
+// --- DM Rate Limits ---
+
+// RecordDMSend records a DM send for rate limiting persistence.
+func (s *KeyDB) RecordDMSend(recipientKey string) error {
+	now := time.Now().Unix()
+	_, err := s.db.Exec(
+		"INSERT OR REPLACE INTO dm_rate_limits (recipient_key, send_count, window_start) VALUES (?, COALESCE((SELECT CASE WHEN ? - window_start < 60 THEN send_count + 1 ELSE 1 END FROM dm_rate_limits WHERE recipient_key = ?), 1), COALESCE((SELECT CASE WHEN ? - window_start < 60 THEN window_start ELSE ? END FROM dm_rate_limits WHERE recipient_key = ?), ?))",
+		recipientKey, now, recipientKey, now, now, recipientKey, now,
+	)
+	return err
+}
+
+// CheckDMRate returns true if the DM send is within rate limits.
+func (s *KeyDB) CheckDMRate(recipientKey string, limit int) bool {
+	now := time.Now().Unix()
+	var count int
+	var windowStart int64
+	err := s.db.QueryRow(
+		"SELECT send_count, window_start FROM dm_rate_limits WHERE recipient_key = ?",
+		recipientKey,
+	).Scan(&count, &windowStart)
+	if err != nil {
+		return true // no record = allowed
+	}
+	if now-windowStart >= 60 {
+		return true // window expired
+	}
+	return count < limit
+}
+
 // --- HTTP Sync Watermark ---
 
 // SetHTTPSyncWatermark persists the HTTP sync watermark.
@@ -621,6 +660,13 @@ func (s *KeyDB) AllPeerWatermarks() ([]PeerWatermark, error) {
 func (s *KeyDB) ClearPeerWatermarks() error {
 	_, err := s.db.Exec("DELETE FROM peer_watermarks")
 	return err
+}
+
+// IntegrityCheck runs PRAGMA integrity_check and returns the result.
+func (s *KeyDB) IntegrityCheck() (string, error) {
+	var result string
+	err := s.db.QueryRow("PRAGMA integrity_check").Scan(&result)
+	return result, err
 }
 
 // Close closes the database.

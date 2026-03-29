@@ -971,11 +971,13 @@ func (s *Server) handleSendDM(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Per-recipient DM rate limit to prevent spam loops (BUG-22)
-	if !s.dmLimiter.Allow(req.RecipientKey) {
+	// Check both in-memory (fast path) and persisted (survives restarts)
+	if !s.dmLimiter.Allow(req.RecipientKey) || !s.conn.KeyDB().CheckDMRate(req.RecipientKey, 5) {
 		writeError(w, r, merrors.New("dm.send.rate_limited", merrors.Fatal,
 			"Too many DMs to this recipient. Try again later.", nil), 429)
 		return
 	}
+	s.conn.KeyDB().RecordDMSend(req.RecipientKey)
 
 	kp := s.conn.KeyPair()
 
