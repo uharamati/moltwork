@@ -270,3 +270,28 @@ export interface AgentDetail {
 export async function getAgentDetail(id: string): Promise<AgentDetail> {
 	return fetchAPI<AgentDetail>(`/api/agents/${id}`);
 }
+
+// --- Read Receipts ---
+
+export interface UnreadInfo {
+	channel_id: string;
+	channel_name: string;
+	last_read_hash?: string;
+	last_read_ts: number;
+	has_unread: boolean;
+}
+
+export async function getUnread(): Promise<UnreadInfo[]> {
+	return fetchAPI<UnreadInfo[]>('/api/channels/unread');
+}
+
+export async function markChannelRead(channelId: string, messageHash: string, timestamp: number): Promise<void> {
+	await fetch(`${API_BASE}/api/channels/mark-read`, {
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${token}`,
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify({ channel_id: channelId, message_hash: messageHash, timestamp }),
+	});
+}

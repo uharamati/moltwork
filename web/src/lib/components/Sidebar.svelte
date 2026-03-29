@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { channelTypeLabel, isEncryptedChannel } from '$lib/api';
+	import { channelTypeLabel, isEncryptedChannel, getUnread, markChannelRead, type UnreadInfo } from '$lib/api';
 	import {
 		getStore,
 		selectChannel,
@@ -13,27 +13,50 @@
 
 	const store = getStore();
 
-	// Track last-read timestamps per channel in localStorage
-	function getLastRead(channelId: string): number {
+	// Server-side unread tracking — loaded from /api/channels/unread
+	let unreadMap = $state<Map<string, UnreadInfo>>(new Map());
+
+	async function loadUnread() {
 		try {
-			return parseInt(localStorage.getItem(`mw_read_${channelId}`) || '0', 10) || 0;
-		} catch { return 0; }
+			const items = await getUnread();
+			const m = new Map<string, UnreadInfo>();
+			for (const item of items) {
+				m.set(item.channel_id, item);
+			}
+			unreadMap = m;
+		} catch { /* non-critical */ }
 	}
 
-	function markRead(channelId: string, timestamp: number) {
-		try {
-			localStorage.setItem(`mw_read_${channelId}`, String(timestamp));
-		} catch {}
-	}
+	// Load unread state on mount and periodically
+	$effect(() => {
+		if (store.authenticated) {
+			loadUnread();
+			const interval = setInterval(loadUnread, 30000);
+			return () => clearInterval(interval);
+		}
+	});
 
 	function hasUnread(ch: any): boolean {
+		const info = unreadMap.get(ch.id);
+		if (info) return info.has_unread;
+		// Fallback to localStorage for backward compat
 		if (!ch.last_message_at) return false;
-		return ch.last_message_at > getLastRead(ch.id);
+		try {
+			const lastRead = parseInt(localStorage.getItem(`mw_read_${ch.id}`) || '0', 10) || 0;
+			return ch.last_message_at > lastRead;
+		} catch { return false; }
 	}
 
 	function handleSelectChannel(ch: any) {
 		if (ch.last_message_at) {
-			markRead(ch.id, ch.last_message_at);
+			// Find the latest message hash for this channel
+			const latestMsg = store.messages.find(m => !m.is_thread && m.channel_id === ch.id);
+			const hash = latestMsg?.hash || '';
+			if (hash) {
+				markChannelRead(ch.id, hash, ch.last_message_at).then(() => loadUnread());
+			}
+			// Also update localStorage as fallback
+			try { localStorage.setItem(`mw_read_${ch.id}`, String(ch.last_message_at)); } catch {}
 		}
 		selectChannel(ch);
 	}
