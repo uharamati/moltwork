@@ -656,6 +656,12 @@ func (s *KeyDB) AllPeerWatermarks() ([]PeerWatermark, error) {
 	return result, rows.Err()
 }
 
+// DeletePeerWatermark removes a single peer's persisted watermark.
+func (s *KeyDB) DeletePeerWatermark(peerID string) error {
+	_, err := s.db.Exec("DELETE FROM peer_watermarks WHERE peer_id = ?", peerID)
+	return err
+}
+
 // ClearPeerWatermarks removes all persisted watermarks (called on PSK rotation).
 func (s *KeyDB) ClearPeerWatermarks() error {
 	_, err := s.db.Exec("DELETE FROM peer_watermarks")

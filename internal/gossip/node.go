@@ -42,9 +42,11 @@ type Node struct {
 	// After a successful sync with a peer, the watermark is set to the max
 	// created_at across both logs. On next sync, only hashes after this
 	// watermark are exchanged. Reset to 0 on PSK rotation.
-	watermarkMu     sync.Mutex
-	peerWatermarks  map[peer.ID]int64
-	peerSyncCounts  map[peer.ID]int // tracks cycles per peer for periodic full sync
+	watermarkMu      sync.Mutex
+	peerWatermarks   map[peer.ID]int64
+	peerSyncCounts   map[peer.ID]int       // tracks cycles per peer for periodic full sync
+	peerLastSeen     map[peer.ID]time.Time // last successful sync time per peer
+	lastPeerEviction time.Time             // last time stale peers were evicted
 
 	minPeers int // minimum peer count before warning
 
@@ -124,6 +126,7 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 		activePeers:    make(map[peer.ID]bool),
 		peerWatermarks: make(map[peer.ID]int64),
 		peerSyncCounts: make(map[peer.ID]int),
+		peerLastSeen:   make(map[peer.ID]time.Time),
 		ctx:            ctx,
 		cancel:         cancel,
 	}
@@ -231,9 +234,37 @@ func (n *Node) syncLoop(interval time.Duration) {
 	}
 }
 
+// peerWatermarkTTL is how long a peer's watermark is retained after last contact.
+const peerWatermarkTTL = 1 * time.Hour
+
+// evictStalePeers removes watermarks for peers not seen in peerWatermarkTTL.
+// Called periodically from syncWithPeers to bound memory growth.
+func (n *Node) evictStalePeers() {
+	n.watermarkMu.Lock()
+	defer n.watermarkMu.Unlock()
+
+	now := time.Now()
+	if now.Sub(n.lastPeerEviction) < peerWatermarkTTL {
+		return
+	}
+	n.lastPeerEviction = now
+
+	for pid, lastSeen := range n.peerLastSeen {
+		if now.Sub(lastSeen) > peerWatermarkTTL {
+			delete(n.peerWatermarks, pid)
+			delete(n.peerSyncCounts, pid)
+			delete(n.peerLastSeen, pid)
+			if n.keyDB != nil {
+				n.keyDB.DeletePeerWatermark(pid.String())
+			}
+		}
+	}
+}
+
 // syncWithPeers initiates sync with all known peers.
 // Each peer sync runs in a goroutine so one stalled peer can't block others.
 func (n *Node) syncWithPeers() {
+	n.evictStalePeers()
 	peers := n.tracker.Peers()
 
 	// Check minimum peer count — rate-limit to once per minute (bug 14)
@@ -392,6 +423,7 @@ func (n *Node) getWatermarkForSync(peerID peer.ID) int64 {
 func (n *Node) setWatermark(peerID peer.ID, watermark int64) {
 	n.watermarkMu.Lock()
 	n.peerWatermarks[peerID] = watermark
+	n.peerLastSeen[peerID] = time.Now()
 	syncCount := n.peerSyncCounts[peerID]
 	n.watermarkMu.Unlock()
 
@@ -407,6 +439,7 @@ func (n *Node) ResetWatermarks() {
 	defer n.watermarkMu.Unlock()
 	n.peerWatermarks = make(map[peer.ID]int64)
 	n.peerSyncCounts = make(map[peer.ID]int)
+	n.peerLastSeen = make(map[peer.ID]time.Time)
 
 	if n.keyDB != nil {
 		n.keyDB.ClearPeerWatermarks()
