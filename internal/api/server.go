@@ -44,6 +44,7 @@ type Server struct {
 	syncSessions   *syncSessionStore
 	syncLimiter    *authRateLimiter
 	dmLimiter      *gossip.RateLimiter // per-recipient DM rate limit (BUG-22)
+	sseConnections int32               // atomic counter for active SSE connections
 	publicServer   *http.Server
 	publicListener net.Listener
 	joinStatuses   sync.Map // joinID -> *joinStatusEntry
@@ -93,6 +94,9 @@ func NewServer(conn *connector.Connector, port int) (*Server, error) {
 	bindAddr := fmt.Sprintf("127.0.0.1:%d", port)
 	listener, err := net.Listen("tcp", bindAddr)
 	if err != nil {
+		if isAddrInUse(err) {
+			return nil, fmt.Errorf("listen %s: address already in use — another moltwork instance may be running on this port", bindAddr)
+		}
 		return nil, fmt.Errorf("listen %s: %w", bindAddr, err)
 	}
 	s.listener = listener
@@ -182,6 +186,11 @@ func (s *Server) StartPublicSync(port int) error {
 		}
 	}()
 	return nil
+}
+
+// isAddrInUse checks if a net.Listen error is "address already in use".
+func isAddrInUse(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "address already in use")
 }
 
 // Close gracefully shuts down the server.

@@ -213,6 +213,7 @@ func (c *Connector) Start(ctx context.Context) error {
 		PSK:             psk,
 		ListenPort:      c.cfg.ListenPort,
 		LogDB:           c.logDB,
+		KeyDB:           c.keyDB,
 		Logger:          logging.New("gossip"),
 		GossipRateLimit: c.cfg.GossipRateLimit,
 		SyncInterval:    10 * time.Second,

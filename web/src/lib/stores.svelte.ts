@@ -30,6 +30,7 @@ let allMyActivity = $state<Message[]>([]);
 let loading = $state(false);
 let consecutiveRefreshErrors = $state(0);
 let pollInterval: ReturnType<typeof setInterval> | null = null;
+let eventSource: EventSource | null = null;
 let messageRequestId = 0; // Monotonic counter to discard stale channel responses
 let expandedThreads = $state<Set<string>>(new Set()); // message hashes with expanded threads
 
@@ -85,9 +86,11 @@ export async function connect() {
 		if (channels.length > 0) {
 			await selectChannel(channels[0]);
 		}
-		// Clear any previous interval before starting a new one
+		// Connect to SSE for real-time updates; fall back to polling if SSE fails
+		connectSSE();
+		// Slow poll as fallback — SSE handles the fast path
 		if (pollInterval) clearInterval(pollInterval);
-		pollInterval = setInterval(refreshMessages, 5000);
+		pollInterval = setInterval(refreshMessages, 30000);
 	} catch (e) {
 		error = 'Failed to connect. Check your token.';
 		authenticated = false;
@@ -112,6 +115,49 @@ export async function initializeSession() {
 	if (saved) {
 		tokenInput = saved;
 		await connect();
+	}
+}
+
+function connectSSE() {
+	disconnectSSE();
+	const url = `/api/events?token=${encodeURIComponent(tokenInput)}`;
+	const es = new EventSource(url);
+	eventSource = es;
+
+	es.addEventListener('activity', async () => {
+		// SSE signals new data — refresh current view
+		try {
+			const freshChannels = await getChannels();
+			const freshAgents = await getAgents();
+			channels = freshChannels;
+			agents = freshAgents;
+			if (selectedChannel) {
+				const stillExists = freshChannels.find(c => c.id === selectedChannel!.id);
+				if (stillExists) selectedChannel = stillExists;
+			}
+			if (currentView === 'channel' && selectedChannel) {
+				messages = (await getMessages(selectedChannel.id)) || [];
+			}
+			consecutiveRefreshErrors = 0;
+		} catch {
+			// SSE delivered but fetch failed — not critical
+		}
+	});
+
+	es.onerror = () => {
+		// EventSource auto-reconnects, but if it closes permanently, fall back to faster polling
+		if (es.readyState === EventSource.CLOSED) {
+			disconnectSSE();
+			if (pollInterval) clearInterval(pollInterval);
+			pollInterval = setInterval(refreshMessages, 5000);
+		}
+	};
+}
+
+function disconnectSSE() {
+	if (eventSource) {
+		eventSource.close();
+		eventSource = null;
 	}
 }
 
@@ -252,6 +298,7 @@ export function clearError() {
 }
 
 export function cleanupPolling() {
+	disconnectSSE();
 	if (pollInterval) {
 		clearInterval(pollInterval);
 		pollInterval = null;

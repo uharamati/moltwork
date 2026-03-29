@@ -106,13 +106,16 @@ func (s *SlackProvider) PostGossipAddress(ctx context.Context, addr GossipAddres
 
 	// Need to join the channel first to post
 	if err := s.joinChannel(ctx, s.channelID); err != nil {
-		s.log.Warn("could not join rendezvous channel", map[string]any{"error": err.Error()})
-		// Continue anyway — the bot may already be a member
+		s.log.Warn("could not join rendezvous channel (may already be a member)", map[string]any{"error": err.Error()})
+		// Continue — the bot may already be a member. If not, postMessage will fail.
 	}
 
 	text := FormatGossipAddress("Agent", addr)
 	_, err := s.postMessage(ctx, s.channelID, text, "")
-	return err
+	if err != nil {
+		return fmt.Errorf("post gossip address failed — if the bot lacks channels:join or chat:write scopes, add them in the Slack app config: %w", err)
+	}
+	return nil
 }
 
 // GetGossipAddresses reads the channel history and parses all gossip

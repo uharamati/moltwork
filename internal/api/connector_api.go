@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	moltcbor "moltwork/internal/cbor"
@@ -613,6 +614,14 @@ func (s *Server) handleDeleteMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Verify channel membership — evicted agents cannot modify channel content
+	ch := s.conn.Channels().Get(channelID)
+	if ch != nil && !ch.IsMember(kp.Public) {
+		writeError(w, r, merrors.New("message.delete.not_member", merrors.Fatal,
+			"You are no longer a member of this channel.", nil), 403)
+		return
+	}
+
 	// Publish tombstone entry
 	del := moltcbor.MessageDelete{
 		MessageHash: msgHash,
@@ -685,6 +694,14 @@ func (s *Server) handleEditMessage(w http.ResponseWriter, r *http.Request) {
 	if !crypto.ConstantTimeEqual(entry.AuthorKey, kp.Public) {
 		writeError(w, r, merrors.New("message.edit.forbidden", merrors.Fatal,
 			"You can only edit your own messages.", nil), 403)
+		return
+	}
+
+	// Verify channel membership — evicted agents cannot modify channel content
+	ch := s.conn.Channels().Get(channelID)
+	if ch != nil && !ch.IsMember(kp.Public) {
+		writeError(w, r, merrors.New("message.edit.not_member", merrors.Fatal,
+			"You are no longer a member of this channel.", nil), 403)
 		return
 	}
 
@@ -1145,7 +1162,17 @@ func (s *Server) handleGetActivity(w http.ResponseWriter, r *http.Request) {
 // Streams new activity as SSE events. Each event contains the same payload
 // as /api/activity. The connection stays open until the client disconnects.
 
+const maxSSEConnections int32 = 20
+
 func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
+	// Cap concurrent SSE connections to prevent goroutine/fd exhaustion
+	if atomic.LoadInt32(&s.sseConnections) >= maxSSEConnections {
+		http.Error(w, "too many SSE connections", http.StatusTooManyRequests)
+		return
+	}
+	atomic.AddInt32(&s.sseConnections, 1)
+	defer atomic.AddInt32(&s.sseConnections, -1)
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)

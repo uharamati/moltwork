@@ -195,6 +195,15 @@ func (s *KeyDB) migrate() error {
 		return fmt.Errorf("create revocation_signatures: %w", err)
 	}
 
+	// Gossip sync watermarks — persisted per-peer so incremental sync survives restarts
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS peer_watermarks (
+		peer_id    TEXT PRIMARY KEY,
+		watermark  INTEGER NOT NULL,
+		sync_count INTEGER NOT NULL DEFAULT 0
+	)`); err != nil {
+		return fmt.Errorf("create peer_watermarks: %w", err)
+	}
+
 	return nil
 }
 
@@ -480,6 +489,60 @@ func (s *KeyDB) ListRevocationProposals() ([]RevocationProposal, error) {
 		proposals = append(proposals, p)
 	}
 	return proposals, rows.Err()
+}
+
+// --- Peer Watermarks (gossip incremental sync) ---
+
+// PeerWatermark holds the sync state for a single peer.
+type PeerWatermark struct {
+	PeerID    string
+	Watermark int64
+	SyncCount int
+}
+
+// SetPeerWatermark persists the watermark and sync count for a peer.
+func (s *KeyDB) SetPeerWatermark(peerID string, watermark int64, syncCount int) error {
+	_, err := s.db.Exec(
+		"INSERT OR REPLACE INTO peer_watermarks (peer_id, watermark, sync_count) VALUES (?, ?, ?)",
+		peerID, watermark, syncCount,
+	)
+	return err
+}
+
+// GetPeerWatermark retrieves the watermark and sync count for a peer.
+func (s *KeyDB) GetPeerWatermark(peerID string) (watermark int64, syncCount int, err error) {
+	err = s.db.QueryRow(
+		"SELECT watermark, sync_count FROM peer_watermarks WHERE peer_id = ?", peerID,
+	).Scan(&watermark, &syncCount)
+	if err == sql.ErrNoRows {
+		return 0, 0, nil
+	}
+	return
+}
+
+// AllPeerWatermarks returns all persisted watermarks.
+func (s *KeyDB) AllPeerWatermarks() ([]PeerWatermark, error) {
+	rows, err := s.db.Query("SELECT peer_id, watermark, sync_count FROM peer_watermarks")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []PeerWatermark
+	for rows.Next() {
+		var pw PeerWatermark
+		if err := rows.Scan(&pw.PeerID, &pw.Watermark, &pw.SyncCount); err != nil {
+			return nil, err
+		}
+		result = append(result, pw)
+	}
+	return result, rows.Err()
+}
+
+// ClearPeerWatermarks removes all persisted watermarks (called on PSK rotation).
+func (s *KeyDB) ClearPeerWatermarks() error {
+	_, err := s.db.Exec("DELETE FROM peer_watermarks")
+	return err
 }
 
 // Close closes the database.

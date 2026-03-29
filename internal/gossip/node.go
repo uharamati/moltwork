@@ -22,6 +22,7 @@ import (
 type Node struct {
 	host      host.Host
 	logDB     *store.LogDB
+	keyDB     *store.KeyDB // optional — persists watermarks across restarts
 	psk       []byte
 	log       *logging.Logger
 	tracker   *PeerTracker
@@ -64,6 +65,7 @@ type NodeConfig struct {
 	PSK             []byte
 	ListenPort      int
 	LogDB           *store.LogDB
+	KeyDB           *store.KeyDB   // optional — if set, watermarks are persisted across restarts
 	Logger          *logging.Logger
 	GossipRateLimit int            // per-author entries/minute (default 100)
 	SyncInterval    time.Duration
@@ -112,6 +114,7 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 	n := &Node{
 		host:           h,
 		logDB:          cfg.LogDB,
+		keyDB:          cfg.KeyDB,
 		psk:            cfg.PSK,
 		log:            cfg.Logger,
 		tracker:        tracker,
@@ -123,6 +126,22 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 		peerSyncCounts: make(map[peer.ID]int),
 		ctx:            ctx,
 		cancel:         cancel,
+	}
+
+	// Load persisted watermarks from keyDB (survives restarts)
+	if cfg.KeyDB != nil {
+		if watermarks, err := cfg.KeyDB.AllPeerWatermarks(); err == nil {
+			for _, pw := range watermarks {
+				pid, err := peer.Decode(pw.PeerID)
+				if err == nil {
+					n.peerWatermarks[pid] = pw.Watermark
+					n.peerSyncCounts[pid] = pw.SyncCount
+				}
+			}
+			if len(watermarks) > 0 {
+				cfg.Logger.Info("loaded persisted watermarks", map[string]any{"count": len(watermarks)})
+			}
+		}
 	}
 
 	// Register sync protocol handler
@@ -369,11 +388,16 @@ func (n *Node) getWatermarkForSync(peerID peer.ID) int64 {
 	return n.peerWatermarks[peerID]
 }
 
-// setWatermark updates the stored watermark for a peer.
+// setWatermark updates the stored watermark for a peer and persists to keyDB.
 func (n *Node) setWatermark(peerID peer.ID, watermark int64) {
 	n.watermarkMu.Lock()
-	defer n.watermarkMu.Unlock()
 	n.peerWatermarks[peerID] = watermark
+	syncCount := n.peerSyncCounts[peerID]
+	n.watermarkMu.Unlock()
+
+	if n.keyDB != nil {
+		n.keyDB.SetPeerWatermark(peerID.String(), watermark, syncCount)
+	}
 }
 
 // ResetWatermarks clears all per-peer watermarks, forcing a full sync
@@ -383,6 +407,10 @@ func (n *Node) ResetWatermarks() {
 	defer n.watermarkMu.Unlock()
 	n.peerWatermarks = make(map[peer.ID]int64)
 	n.peerSyncCounts = make(map[peer.ID]int)
+
+	if n.keyDB != nil {
+		n.keyDB.ClearPeerWatermarks()
+	}
 }
 
 // getPSK returns the current PSK, protected by the read lock.

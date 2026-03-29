@@ -7,10 +7,11 @@ import (
 
 // RateLimiter tracks per-author entry rates (rules N5, N6).
 type RateLimiter struct {
-	mu       sync.Mutex
-	counters map[string]*rateBucket
-	limit    int           // max entries per window
-	window   time.Duration // time window
+	mu            sync.Mutex
+	counters      map[string]*rateBucket
+	limit         int           // max entries per window
+	window        time.Duration // time window
+	lastEviction  time.Time     // last time expired buckets were evicted
 }
 
 type rateBucket struct {
@@ -34,6 +35,19 @@ func (rl *RateLimiter) Allow(authorID string) bool {
 	defer rl.mu.Unlock()
 
 	now := time.Now()
+
+	// Periodically evict all expired buckets to prevent unbounded memory
+	// growth from unique author keys that sent once and never again.
+	// Runs at most once per window to amortize the scan cost.
+	if rl.lastEviction.IsZero() || now.Sub(rl.lastEviction) > rl.window {
+		for k, b := range rl.counters {
+			if now.Sub(b.windowStart) > rl.window {
+				delete(rl.counters, k)
+			}
+		}
+		rl.lastEviction = now
+	}
+
 	bucket, ok := rl.counters[authorID]
 	if !ok || now.Sub(bucket.windowStart) > rl.window {
 		rl.counters[authorID] = &rateBucket{count: 1, windowStart: now}
