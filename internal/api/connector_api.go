@@ -857,10 +857,9 @@ func (s *Server) handlePin(w http.ResponseWriter, r *http.Request, unpin bool) {
 	}
 
 	kp := s.conn.KeyPair()
-	selfHex := fmt.Sprintf("%x", kp.Public)
-	if _, isMember := ch.Members[selfHex]; !isMember {
-		writeError(w, r, merrors.New("channel.pin.not_member", merrors.Fatal,
-			"You must be a member of the channel to pin messages.", nil), 403)
+	if !ch.IsAdmin(kp.Public) {
+		writeError(w, r, merrors.New("channel.pin.not_admin", merrors.Fatal,
+			"Only channel admins can pin or unpin messages.", nil), 403)
 		return
 	}
 

@@ -178,6 +178,13 @@ func NewNode(parentCtx context.Context, cfg NodeConfig) (*Node, error) {
 // syncLoop periodically syncs with discovered peers.
 func (n *Node) syncLoop(interval time.Duration) {
 	defer n.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			n.log.Error("panic in sync loop", map[string]any{
+				"panic": fmt.Sprintf("%v", r),
+			})
+		}
+	}()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 

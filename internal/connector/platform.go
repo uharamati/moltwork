@@ -109,10 +109,11 @@ func formatJoinAnnouncement(displayName, title, team string) string {
 // paginating through all results until the channel is found or all pages
 // are exhausted.
 func (c *Connector) slackFindChannel(token, name string) (string, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 	cursor := ""
+	maxPages := 50 // safety cap for very large workspaces
 
-	for {
+	for page := 0; page < maxPages; page++ {
 		url := "https://slack.com/api/conversations.list?types=public_channel&limit=200"
 		if cursor != "" {
 			url += "&cursor=" + cursor

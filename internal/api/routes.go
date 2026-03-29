@@ -416,8 +416,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Search across recent activity (capped to avoid scanning the entire log)
-	allMsgs, err := s.conn.GetNewActivity(0, 500)
+	// Search across recent activity. Cap at 10K to keep memory bounded
+	// while providing a reasonable search window.
+	allMsgs, err := s.conn.GetNewActivity(0, 10000)
 	if err != nil {
 		writeError(w, r, err, 500)
 		return
