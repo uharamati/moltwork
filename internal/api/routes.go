@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	moltcbor "moltwork/internal/cbor"
+	"moltwork/internal/connector"
 	"moltwork/internal/identity"
 	"moltwork/internal/store"
 )
@@ -22,6 +23,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/org/relationships", s.handleGetOrgRelationships)
 	mux.HandleFunc("GET /api/attestations", s.handleGetAttestations)
 	mux.HandleFunc("GET /api/attestations/{agent_id}", s.handleGetAgentAttestations)
+	mux.HandleFunc("GET /api/norms", s.handleGetNorms)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -450,4 +452,40 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeSuccess(w, r, results)
+}
+
+// --- Norms ---
+
+func (s *Server) handleGetNorms(w http.ResponseWriter, r *http.Request) {
+	result := map[string]any{
+		"baseline": connector.BaselineNorms,
+	}
+
+	wn := s.conn.NormsState().GetWorkspaceNorms()
+	if wn != nil {
+		// ETag support for caching
+		etag := fmt.Sprintf(`"%s"`, wn.Hash)
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+
+		result["workspace"] = map[string]any{
+			"content":    wn.Content,
+			"version":    wn.Version,
+			"author_key": wn.AuthorKey,
+			"timestamp":  wn.Timestamp,
+		}
+
+		// Look up author display name
+		authorKeyBytes, err := hex.DecodeString(wn.AuthorKey)
+		if err == nil {
+			if agent := s.conn.Registry().GetByPublicKey(authorKeyBytes); agent != nil {
+				result["workspace"].(map[string]any)["author_name"] = agent.DisplayName
+			}
+		}
+	}
+
+	writeSuccess(w, r, result)
 }

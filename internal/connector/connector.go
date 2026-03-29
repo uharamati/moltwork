@@ -47,7 +47,8 @@ type Connector struct {
 
 	rebuildMu    sync.RWMutex // protects state rebuild (registry, channels, org) from concurrent API reads
 	pairwiseMu   sync.Mutex   // protects EstablishPairwiseSecrets
-	syncPeerURLs []string   // HTTP sync peer URLs (from config + rendezvous)
+	syncPeerURLs       []string // HTTP sync peer URLs (from config + rendezvous)
+	httpSyncWatermark  int64    // watermark for HTTP sync fallback (reduces hash set size)
 	syncRebuild  chan struct{} // debounce channel for onSyncComplete rebuilds
 	displayName          string // agent's display name, set during join
 	cachedPlatformUserID string // cached to avoid O(n) scan every call
@@ -71,6 +72,9 @@ type Connector struct {
 	pinCache     map[string]map[string]bool // channel_id_hex -> set of message_hash_hex
 	pinCacheTime time.Time
 	pinCacheMu   sync.RWMutex
+
+	// Workspace norms state
+	normsState NormsState
 
 	// Subscriber notification: broadcast when new entries arrive via gossip or local publish.
 	// API handlers (SSE, long-polling) subscribe to get notified of new data.
@@ -173,6 +177,9 @@ func (c *Connector) Start(ctx context.Context) error {
 	// Replay channel state (creates + membership events)
 	c.replayChannelState()
 
+	// Replay workspace norms from the log
+	c.replayNormsUpdates()
+
 	// Replay pairwise key exchange entries (for rotation handling)
 	c.replayPairwiseKeyExchanges()
 
@@ -259,6 +266,7 @@ func (c *Connector) Start(ctx context.Context) error {
 				c.registry.LoadFromDB(c.logDB)
 				c.replayChannelState()
 				c.replayOrgRelationships()
+				c.replayNormsUpdates()
 				c.EstablishPairwiseSecrets()
 				c.replayGroupKeyDistributes()
 				c.rebuildMu.Unlock()

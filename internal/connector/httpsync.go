@@ -131,9 +131,19 @@ func (c *Connector) syncChallenge(client *http.Client, syncURL string, psk []byt
 }
 
 // syncPull requests entries from the peer and stores them locally.
+// Uses the log's latest timestamp to reduce the hash set size — only sends
+// hashes for entries newer than the last sync (same optimization as gossip watermarks).
 func (c *Connector) syncPull(client *http.Client, syncURL string, token string) error {
-	// Get our current hashes
-	localHashes, err := c.logDB.AllHashes()
+	// Use latest timestamp as a rough watermark — on subsequent pulls, only
+	// send hashes for recent entries rather than the full set.
+	maxTs, _ := c.logDB.MaxCreatedAt()
+	var localHashes [][]byte
+	var err error
+	if c.httpSyncWatermark > 0 {
+		localHashes, err = c.logDB.HashesSince(c.httpSyncWatermark)
+	} else {
+		localHashes, err = c.logDB.AllHashes()
+	}
 	if err != nil {
 		return fmt.Errorf("get local hashes: %w", err)
 	}
@@ -146,6 +156,7 @@ func (c *Connector) syncPull(client *http.Client, syncURL string, token string) 
 	reqBody, _ := json.Marshal(map[string]any{
 		"token":        token,
 		"known_hashes": knownHashes,
+		"since":        c.httpSyncWatermark,
 	})
 
 	resp, err := client.Post(syncURL+"/api/sync/pull", "application/json", bytes.NewReader(reqBody))
@@ -230,6 +241,13 @@ func (c *Connector) syncPull(client *http.Client, syncURL string, token string) 
 		"url":      syncURL,
 		"received": len(syncEntries),
 	})
+
+	// Update watermark for next pull
+	if newMax, err := c.logDB.MaxCreatedAt(); err == nil && newMax > maxTs {
+		c.httpSyncWatermark = newMax
+	} else if maxTs > 0 {
+		c.httpSyncWatermark = maxTs
+	}
 
 	// Rebuild in-memory state from the updated log
 	c.registry.LoadFromDB(c.logDB)

@@ -61,6 +61,9 @@ func (s *Server) registerConnectorRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/channels/mark-read", s.handleMarkRead)
 	mux.HandleFunc("GET /api/channels/unread", s.handleGetUnread)
 
+	// --- Norms ---
+	mux.HandleFunc("POST /api/norms", s.handlePublishNorms)
+
 	// --- Identity ---
 	mux.HandleFunc("GET /api/identity", s.handleGetIdentity)
 	mux.HandleFunc("POST /api/identity/update", s.handleUpdateIdentity)
@@ -2435,4 +2438,33 @@ func (s *Server) handleQuorumListProposals(w http.ResponseWriter, r *http.Reques
 	}
 
 	writeSuccess(w, r, proposals)
+}
+
+// --- Norms ---
+
+type publishNormsRequest struct {
+	Content string `json:"content"`
+	Version uint32 `json:"version"`
+}
+
+func (s *Server) handlePublishNorms(w http.ResponseWriter, r *http.Request) {
+	var req publishNormsRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, r, merrors.New("norms.publish.invalid_request", merrors.Fatal,
+			"Invalid request body.", nil), 400)
+		return
+	}
+	if req.Content == "" || req.Version == 0 {
+		writeError(w, r, merrors.New("norms.publish.missing_fields", merrors.Fatal,
+			"Content and version are required.", nil), 400)
+		return
+	}
+
+	if err := s.conn.PublishNormsUpdate(req.Content, req.Version); err != nil {
+		writeError(w, r, merrors.New("norms.publish.failed", merrors.Fatal,
+			fmt.Sprintf("Failed to publish norms: %s", err.Error()), nil), 500)
+		return
+	}
+
+	writeSuccess(w, r, map[string]any{"status": "published", "version": req.Version})
 }

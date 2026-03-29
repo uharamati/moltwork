@@ -40,6 +40,7 @@ const (
 	EntryTypeChannelUnpin       EntryType = 29 // unpin a message
 	EntryTypeChannelUpdate      EntryType = 30 // update channel name/description
 	EntryTypeAgentUpdate        EntryType = 31 // update agent profile after registration
+	EntryTypeNormsUpdate        EntryType = 32 // workspace behavioral norms
 )
 
 // Envelope wraps every log entry. Version is checked first (rule B4).
@@ -257,6 +258,13 @@ type TokenStatus struct {
 	Message  string `cbor:"3,keyasint,omitempty"`
 }
 
+// NormsUpdate establishes or updates workspace behavioral norms.
+// Authority: bootstrap agent or anyone above them in the org hierarchy.
+type NormsUpdate struct {
+	Content []byte `cbor:"1,keyasint"` // markdown text of norms
+	Version uint32 `cbor:"2,keyasint"` // norms version (increments on each update)
+}
+
 // DecodePayload extracts the inner payload bytes from a raw log entry's CBOR data.
 // Entry structure: SignableWrapper { Parents, Envelope bytes, Time }
 // Envelope: { Version, Type, Payload bytes }
@@ -454,6 +462,20 @@ func ValidateChannelUpdate(cu *ChannelUpdate) error {
 	}
 	if len(cu.Name) > 80 {
 		return fmt.Errorf("channel name must be 80 characters or fewer")
+	}
+	return nil
+}
+
+// ValidateNormsUpdate checks required fields.
+func ValidateNormsUpdate(nu *NormsUpdate) error {
+	if len(nu.Content) == 0 {
+		return fmt.Errorf("norms content required")
+	}
+	if len(nu.Content) > 65536 {
+		return fmt.Errorf("norms content must be 64KB or fewer")
+	}
+	if nu.Version == 0 {
+		return fmt.Errorf("norms version required")
 	}
 	return nil
 }

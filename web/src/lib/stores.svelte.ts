@@ -11,7 +11,7 @@ import {
 	type Message,
 } from '$lib/api';
 
-export type CurrentView = 'channel' | 'my-activity' | 'org-chart';
+export type CurrentView = 'channel' | 'my-activity' | 'org-chart' | 'workspace';
 export type RightTab = 'participants' | 'all-agents';
 
 let status = $state<Status | null>(null);
@@ -289,6 +289,12 @@ export async function showMyActivity() {
 
 export function showOrgChart() {
 	currentView = 'org-chart';
+	selectedChannel = null;
+	rightTab = 'all-agents';
+}
+
+export function showWorkspace() {
+	currentView = 'workspace';
 	selectedChannel = null;
 	rightTab = 'all-agents';
 }

@@ -58,6 +58,7 @@ export interface Status {
 	peer_id?: string;
 	workspace_domain?: string;
 	workspace_platform?: string;
+	version?: string;
 }
 
 export interface ChannelMember {
@@ -283,6 +284,23 @@ export interface UnreadInfo {
 
 export async function getUnread(): Promise<UnreadInfo[]> {
 	return fetchAPI<UnreadInfo[]>('/api/channels/unread');
+}
+
+// --- Norms ---
+
+export interface NormsResponse {
+	baseline: string;
+	workspace?: {
+		content: string;
+		version: number;
+		author_key: string;
+		author_name?: string;
+		timestamp: number;
+	};
+}
+
+export async function getNorms(): Promise<NormsResponse> {
+	return fetchAPI<NormsResponse>('/api/norms');
 }
 
 export async function markChannelRead(channelId: string, messageHash: string, timestamp: number): Promise<void> {

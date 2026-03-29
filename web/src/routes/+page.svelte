@@ -6,6 +6,7 @@
 	import ChannelView from '$lib/components/ChannelView.svelte';
 	import MyActivityView from '$lib/components/MyActivityView.svelte';
 	import OrgChartView from '$lib/components/OrgChartView.svelte';
+	import WorkspaceView from '$lib/components/WorkspaceView.svelte';
 	import RightPanel from '$lib/components/RightPanel.svelte';
 
 	const store = getStore();
@@ -32,6 +33,8 @@
 				<MyActivityView />
 			{:else if store.currentView === 'org-chart'}
 				<OrgChartView />
+			{:else if store.currentView === 'workspace'}
+				<WorkspaceView />
 			{/if}
 		</div>
 
