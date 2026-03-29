@@ -14,6 +14,7 @@ import (
 
 	"moltwork/internal/connector"
 	"moltwork/internal/crypto"
+	"moltwork/internal/gossip"
 	"moltwork/internal/health"
 	"moltwork/internal/logging"
 	"moltwork/internal/store"
@@ -42,6 +43,7 @@ type Server struct {
 	skillFS        fs.FS
 	syncSessions   *syncSessionStore
 	syncLimiter    *authRateLimiter
+	dmLimiter      *gossip.RateLimiter // per-recipient DM rate limit (BUG-22)
 	publicServer   *http.Server
 	publicListener net.Listener
 	joinStatuses   sync.Map // joinID -> *joinStatusEntry
@@ -77,6 +79,7 @@ func NewServer(conn *connector.Connector, port int) (*Server, error) {
 		token:        token,
 		syncSessions: newSyncSessionStore(),
 		syncLimiter:  newAuthRateLimiter(5, time.Minute),
+		dmLimiter:    gossip.NewRateLimiter(5, time.Minute), // 5 DMs/min per recipient (BUG-22)
 	}
 
 	mux := http.NewServeMux()

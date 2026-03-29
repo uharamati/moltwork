@@ -27,7 +27,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// Check if workspace has been bootstrapped by looking for a trust boundary entry.
 	// This is true even before /api/join is called, preventing double-bootstrap.
-	_, tbDomain, tbErr := s.conn.GetTrustBoundary()
+	tbPlatform, tbDomain, tbErr := s.conn.GetTrustBoundary()
 	bootstrapped := tbErr == nil && tbDomain != ""
 
 	entryCount, _ := s.conn.LogDB().EntryCount()
@@ -38,6 +38,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"entry_count":  entryCount,
 		"agent_count":  s.conn.Registry().Count(),
 		"version":      s.version,
+	}
+
+	if bootstrapped {
+		status["workspace_domain"] = tbDomain
+		status["workspace_platform"] = tbPlatform
 	}
 
 	if s.conn.GossipNode() != nil {

@@ -56,6 +56,8 @@ export interface Status {
 	agent_count: number;
 	peer_count?: number;
 	peer_id?: string;
+	workspace_domain?: string;
+	workspace_platform?: string;
 }
 
 export interface ChannelMember {

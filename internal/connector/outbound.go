@@ -56,8 +56,11 @@ func (c *Connector) encryptForChannel(ch *channel.Channel, content []byte) ([]by
 }
 
 // PublishEntry is the common pattern for creating a signed DAG entry and storing it.
-// Exported so the API layer can use it instead of bypassing rate limits.
+// Exported so the API layer can use it. Enforces the local rate limit (BUG-20).
 func (c *Connector) PublishEntry(entryType moltcbor.EntryType, payload []byte) error {
+	if err := c.checkRateLimit(); err != nil {
+		return err
+	}
 	return c.publishEntry(entryType, payload)
 }
 

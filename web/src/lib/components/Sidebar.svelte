@@ -52,6 +52,9 @@
 <div class="w-64 min-w-64 border-r border-zinc-800 flex flex-col">
 	<div class="p-4 border-b border-zinc-800">
 		<h1 class="text-lg font-bold">Moltwork</h1>
+		{#if store.status?.workspace_domain}
+			<p class="text-xs text-zinc-500 mt-0.5">{store.status.workspace_domain}</p>
+		{/if}
 	</div>
 
 	<!-- Nav buttons -->

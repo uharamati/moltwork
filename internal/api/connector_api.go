@@ -950,6 +950,13 @@ func (s *Server) handleSendDM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-recipient DM rate limit to prevent spam loops (BUG-22)
+	if !s.dmLimiter.Allow(req.RecipientKey) {
+		writeError(w, r, merrors.New("dm.send.rate_limited", merrors.Fatal,
+			"Too many DMs to this recipient. Try again later.", nil), 429)
+		return
+	}
+
 	kp := s.conn.KeyPair()
 
 	// Get or create the DM channel
