@@ -195,6 +195,16 @@ func (s *KeyDB) migrate() error {
 		return fmt.Errorf("create revocation_signatures: %w", err)
 	}
 
+	// Pending group key distributions — queued when pairwise secret not yet available
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS pending_key_distributions (
+		channel_id BLOB NOT NULL,
+		target_key BLOB NOT NULL,
+		created_at INTEGER NOT NULL,
+		PRIMARY KEY (channel_id, target_key)
+	)`); err != nil {
+		return fmt.Errorf("create pending_key_distributions: %w", err)
+	}
+
 	// Gossip sync watermarks — persisted per-peer so incremental sync survives restarts
 	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS peer_watermarks (
 		peer_id    TEXT PRIMARY KEY,
@@ -489,6 +499,55 @@ func (s *KeyDB) ListRevocationProposals() ([]RevocationProposal, error) {
 		proposals = append(proposals, p)
 	}
 	return proposals, rows.Err()
+}
+
+// --- Pending Group Key Distributions ---
+
+// AddPendingKeyDistribution queues a group key distribution for later delivery.
+func (s *KeyDB) AddPendingKeyDistribution(channelID, targetKey []byte) error {
+	_, err := s.db.Exec(
+		"INSERT OR REPLACE INTO pending_key_distributions (channel_id, target_key, created_at) VALUES (?, ?, ?)",
+		channelID, targetKey, time.Now().Unix(),
+	)
+	return err
+}
+
+// RemovePendingKeyDistribution removes a completed distribution.
+func (s *KeyDB) RemovePendingKeyDistribution(channelID, targetKey []byte) error {
+	_, err := s.db.Exec(
+		"DELETE FROM pending_key_distributions WHERE channel_id = ? AND target_key = ?",
+		channelID, targetKey,
+	)
+	return err
+}
+
+// PendingKeyDistribution represents a queued group key delivery.
+type PendingKeyDistribution struct {
+	ChannelID []byte
+	TargetKey []byte
+	CreatedAt int64
+}
+
+// GetPendingKeyDistributions returns all pending distributions for a target.
+func (s *KeyDB) GetPendingKeyDistributions(targetKey []byte) ([]PendingKeyDistribution, error) {
+	rows, err := s.db.Query(
+		"SELECT channel_id, target_key, created_at FROM pending_key_distributions WHERE target_key = ?",
+		targetKey,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []PendingKeyDistribution
+	for rows.Next() {
+		var p PendingKeyDistribution
+		if err := rows.Scan(&p.ChannelID, &p.TargetKey, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, p)
+	}
+	return result, rows.Err()
 }
 
 // --- Peer Watermarks (gossip incremental sync) ---

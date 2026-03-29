@@ -429,6 +429,9 @@ func (c *Connector) EstablishPairwiseSecrets() {
 		c.log.Info("established pairwise secret", map[string]any{
 			"peer": fmt.Sprintf("%x", agent.PublicKey[:8]),
 		})
+
+		// Deliver any pending group key distributions now that we have the secret
+		c.deliverPendingGroupKeys(agent.PublicKey, secret[:])
 	}
 }
 

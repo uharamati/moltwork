@@ -102,6 +102,57 @@ func (c *Connector) checkRateLimit() error {
 	return nil
 }
 
+// deliverPendingGroupKeys checks for queued group key distributions for a peer
+// and delivers them now that the pairwise secret is available.
+func (c *Connector) deliverPendingGroupKeys(peerKey, pairwiseSecret []byte) {
+	pending, err := c.keyDB.GetPendingKeyDistributions(peerKey)
+	if err != nil || len(pending) == 0 {
+		return
+	}
+
+	var secretArr [32]byte
+	copy(secretArr[:], pairwiseSecret)
+
+	for _, p := range pending {
+		keyBytes, epoch, _ := c.keyDB.GetGroupKey(p.ChannelID)
+		if keyBytes == nil {
+			c.keyDB.RemovePendingKeyDistribution(p.ChannelID, p.TargetKey)
+			continue
+		}
+
+		bound := sealGroupKeyWithBinding(p.ChannelID, epoch, keyBytes)
+		sealed, err := crypto.SealForPeer(secretArr, bound)
+		if err != nil {
+			c.log.Warn("failed to seal pending group key", map[string]any{
+				"target": fmt.Sprintf("%x", peerKey[:8]),
+				"error":  err.Error(),
+			})
+			continue
+		}
+
+		dist := moltcbor.GroupKeyDistribute{
+			ChannelID:    p.ChannelID,
+			TargetPubKey: p.TargetKey,
+			Sealed:       sealed,
+			Epoch:        uint64(epoch),
+		}
+		distPayload, _ := moltcbor.Marshal(dist)
+		if err := c.publishEntry(moltcbor.EntryTypeGroupKeyDistribute, distPayload); err != nil {
+			c.log.Warn("failed to publish pending group key distribution", map[string]any{
+				"target": fmt.Sprintf("%x", peerKey[:8]),
+				"error":  err.Error(),
+			})
+			continue
+		}
+
+		c.keyDB.RemovePendingKeyDistribution(p.ChannelID, p.TargetKey)
+		c.log.Info("delivered pending group key", map[string]any{
+			"target":  fmt.Sprintf("%x", peerKey[:8]),
+			"channel": fmt.Sprintf("%x", p.ChannelID[:8]),
+		})
+	}
+}
+
 // rotateGroupKey generates a new group key for a channel and distributes it to all members
 // except those in excludeKeys.
 func (c *Connector) rotateGroupKey(ch *channel.Channel, excludeKeys ...[]byte) error {
@@ -509,9 +560,11 @@ func (c *Connector) PublishMemberInvite(channelID, inviteeKey []byte) error {
 		// Distribute group key to new member
 		secret, _, err := c.keyDB.GetPairwiseSecret(inviteeKey)
 		if err != nil || secret == nil {
-			c.log.Warn("cannot distribute group key to invitee: no pairwise secret", map[string]any{
+			c.log.Warn("no pairwise secret for invitee, queuing group key distribution for retry", map[string]any{
 				"invitee": fmt.Sprintf("%x", inviteeKey[:8]),
 			})
+			// Queue for retry when pairwise secret is established
+			c.keyDB.AddPendingKeyDistribution(channelID, inviteeKey)
 		} else {
 			keyBytes, epoch, _ := c.keyDB.GetGroupKey(channelID)
 			if keyBytes != nil {
