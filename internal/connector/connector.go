@@ -76,6 +76,9 @@ type Connector struct {
 	// Workspace norms state
 	normsState NormsState
 
+	// Rendezvous health tracking
+	rendezvousError string // last error from rendezvous channel join, empty if healthy
+
 	// Integrity check cache — per-instance instead of package-level (M9)
 	logDBIntegrityResult string
 	logDBIntegrityTime   time.Time
@@ -464,6 +467,11 @@ func (c *Connector) KeyPair() *crypto.SigningKeyPair {
 	return c.keyPair
 }
 
+// RendezvousError returns the last rendezvous channel error, or "" if healthy.
+func (c *Connector) RendezvousError() string {
+	return c.rendezvousError
+}
+
 // Context returns the connector's lifecycle context, cancelled on shutdown.
 func (c *Connector) Context() context.Context {
 	return c.ctx
@@ -699,9 +707,11 @@ func (c *Connector) startJoinRequestWatcher() {
 	// Check if the channel exists before starting the watcher
 	exists, err := rv.WorkspaceExists(c.ctx)
 	if err != nil || !exists {
-		c.log.Info("rendezvous channel not found, join request watcher not started")
+		c.rendezvousError = "rendezvous channel not found — ensure #moltwork-agents exists and the bot is a member"
+		c.log.Warn("rendezvous channel not found, join request watcher not started")
 		return
 	}
+	c.rendezvousError = "" // healthy
 
 	// Cache the resolved channel ID for fast startup next time
 	if chID := rv.ChannelID(); chID != "" {

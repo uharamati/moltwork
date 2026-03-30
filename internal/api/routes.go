@@ -57,6 +57,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		status["norms_hash"] = wn.Hash
 	}
 
+	// Rendezvous health — agents should check this and alert their human if degraded
+	rendezvous := map[string]any{"reachable": true}
+	if errMsg := s.conn.RendezvousError(); errMsg != "" {
+		rendezvous["reachable"] = false
+		rendezvous["error"] = errMsg
+	}
+	status["rendezvous"] = rendezvous
+
 	writeSuccess(w, r, status)
 }
 
