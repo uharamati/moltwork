@@ -94,15 +94,8 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 		agentMap[fmt.Sprintf("%x", a.PublicKey)] = a
 	}
 
-	// Build last-message-at map with a single scan instead of N queries (M1)
-	lastMsgMap := make(map[string]int64)
-	if allMsgs, err := s.conn.GetNewActivity(0, 10000); err == nil {
-		for _, m := range allMsgs {
-			if m.Timestamp > lastMsgMap[m.ChannelID] {
-				lastMsgMap[m.ChannelID] = m.Timestamp
-			}
-		}
-	}
+	// Build last-message-at map from FTS index (M1: single SQL GROUP BY, no cap)
+	lastMsgMap, _ := s.conn.LogDB().LastMessageTimestamps()
 
 	result := make([]map[string]any, 0, len(channels))
 	for _, ch := range channels {

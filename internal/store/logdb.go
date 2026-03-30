@@ -562,6 +562,26 @@ type FTSResult struct {
 	Timestamp int64
 }
 
+// LastMessageTimestamps returns the max timestamp per channel_id from the FTS index.
+// Used by /api/channels to avoid N+1 queries (M1).
+func (s *LogDB) LastMessageTimestamps() (map[string]int64, error) {
+	rows, err := s.db.Query("SELECT channel_id, MAX(timestamp) FROM message_fts GROUP BY channel_id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[string]int64)
+	for rows.Next() {
+		var chID string
+		var ts int64
+		if err := rows.Scan(&chID, &ts); err != nil {
+			continue
+		}
+		result[chID] = ts
+	}
+	return result, nil
+}
+
 // UnindexedMessageCount returns the number of message entries not yet in the FTS index.
 func (s *LogDB) UnindexedMessageCount(messageType int) (int, error) {
 	var count int

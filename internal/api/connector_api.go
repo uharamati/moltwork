@@ -1356,7 +1356,7 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// For private channels, distribute the initial group key to all members
-	if req.Type == "private" {
+	if channelType == "private" {
 		if rotateErr := s.conn.DistributeInitialGroupKey(ch); rotateErr != nil {
 			s.conn.Log().Warn("distribute initial group key failed", map[string]any{"error": rotateErr.Error()})
 		}
@@ -2275,6 +2275,9 @@ func (s *Server) handleGetUnread(w http.ResponseWriter, r *http.Request) {
 		HasUnread    bool   `json:"has_unread"`
 	}
 
+	// Get per-channel latest message timestamps from FTS index (fixes cross-channel collision)
+	lastMsgMap, _ := s.conn.LogDB().LastMessageTimestamps()
+
 	var result []unreadInfo
 	for _, ch := range channels {
 		chIDHex := fmt.Sprintf("%x", ch.ID)
@@ -2283,27 +2286,10 @@ func (s *Server) handleGetUnread(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Check if there are messages newer than the last read timestamp
-		latestEntries, err := s.conn.LogDB().EntriesByTypeInRange(int(moltcbor.EntryTypeMessage), lastTs, 1)
-		if err != nil {
-			continue
-		}
-
-		// Filter entries to only those in this channel
+		// Compare last read timestamp against latest message in this specific channel
 		hasUnread := false
-		for _, entry := range latestEntries {
-			payload := moltcbor.DecodePayload(entry.RawCBOR)
-			if payload == nil {
-				continue
-			}
-			var msg moltcbor.Message
-			if err := moltcbor.Unmarshal(payload, &msg); err != nil {
-				continue
-			}
-			if fmt.Sprintf("%x", msg.ChannelID) == chIDHex {
-				hasUnread = true
-				break
-			}
+		if latestTs, ok := lastMsgMap[chIDHex]; ok && latestTs > lastTs {
+			hasUnread = true
 		}
 
 		result = append(result, unreadInfo{

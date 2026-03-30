@@ -260,6 +260,8 @@ func (n *Node) evictStalePeers() {
 			delete(n.peerWatermarks, pid)
 			delete(n.peerSyncCounts, pid)
 			delete(n.peerLastSeen, pid)
+			delete(n.peerFailures, pid)
+			delete(n.peerNextRetry, pid)
 			if n.keyDB != nil {
 				n.keyDB.DeletePeerWatermark(pid.String())
 			}
