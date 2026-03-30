@@ -533,6 +533,9 @@ type sendMessageRequest struct {
 }
 
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
+	if s.checkWriteRate(w, r) {
+		return
+	}
 	var req sendMessageRequest
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, r, merrors.New("message.send.invalid_request", merrors.Fatal,
@@ -744,6 +747,9 @@ func (s *Server) handleUnreactMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReaction(w http.ResponseWriter, r *http.Request, remove bool) {
+	if s.checkWriteRate(w, r) {
+		return
+	}
 	var req reactMessageRequest
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, r, merrors.New("message.react.invalid_request", merrors.Fatal,
@@ -971,6 +977,9 @@ type sendDMRequest struct {
 }
 
 func (s *Server) handleSendDM(w http.ResponseWriter, r *http.Request) {
+	if s.checkWriteRate(w, r) {
+		return
+	}
 	var req sendDMRequest
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, r, merrors.New("dm.send.invalid_request", merrors.Fatal,
@@ -1320,6 +1329,9 @@ func (req *createChannelRequest) resolveChannelType() string {
 }
 
 func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
+	if s.checkWriteRate(w, r) {
+		return
+	}
 	var req createChannelRequest
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, r, merrors.New("channel.create.invalid_request", merrors.Fatal,
@@ -1771,6 +1783,9 @@ type sendThreadReplyRequest struct {
 }
 
 func (s *Server) handleSendThreadReply(w http.ResponseWriter, r *http.Request) {
+	if s.checkWriteRate(w, r) {
+		return
+	}
 	var req sendThreadReplyRequest
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, r, fmt.Errorf("invalid request body"), 400)
@@ -1880,8 +1895,8 @@ func (s *Server) handleGetCapabilities(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Find the latest capability declaration from this agent
-	entries, err := s.conn.LogDB().EntriesByType(int(moltcbor.EntryTypeCapabilityDecl))
+	// Find the latest capability declaration from this agent (indexed by author key)
+	entries, err := s.conn.LogDB().GetEntriesByAuthor(agentKey, 0)
 	if err != nil {
 		writeError(w, r, err, 500)
 		return
@@ -1890,7 +1905,7 @@ func (s *Server) handleGetCapabilities(w http.ResponseWriter, r *http.Request) {
 	var latestDecl *moltcbor.CapabilityDeclaration
 	var latestTs int64
 	for _, raw := range entries {
-		if hex.EncodeToString(raw.AuthorKey) != hex.EncodeToString(agentKey) {
+		if raw.EntryType != int(moltcbor.EntryTypeCapabilityDecl) {
 			continue
 		}
 		if raw.CreatedAt <= latestTs {
@@ -2094,6 +2109,19 @@ func readJSON(r *http.Request, v any) error {
 	return json.Unmarshal(body, v)
 }
 
+
+// checkWriteRate enforces the per-agent write rate limit (30/min).
+// Returns true if the request should be rejected (rate limited).
+func (s *Server) checkWriteRate(w http.ResponseWriter, r *http.Request) bool {
+	agentKey := fmt.Sprintf("%x", s.conn.KeyPair().Public)
+	if !s.writeLimiter.Allow(agentKey) {
+		w.Header().Set("Retry-After", "2")
+		writeError(w, r, merrors.New("api.rate_limited", merrors.Transient,
+			"Write rate limit exceeded (30/min). Try again shortly.", nil), 429)
+		return true
+	}
+	return false
+}
 
 // sanitizeText strips control characters (\x00-\x1f except \t, \n, \r)
 // from free-text fields to prevent log injection and terminal escape attacks.

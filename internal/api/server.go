@@ -44,6 +44,7 @@ type Server struct {
 	syncSessions   *syncSessionStore
 	syncLimiter    *authRateLimiter
 	dmLimiter      *gossip.RateLimiter // per-recipient DM rate limit (BUG-22)
+	writeLimiter   *gossip.RateLimiter // per-agent write rate limit (30/min)
 	sseConnections int32               // atomic counter for active SSE connections
 	publicServer   *http.Server
 	publicListener net.Listener
@@ -80,7 +81,8 @@ func NewServer(conn *connector.Connector, port int) (*Server, error) {
 		token:        token,
 		syncSessions: newSyncSessionStore(),
 		syncLimiter:  newAuthRateLimiter(5, time.Minute),
-		dmLimiter:    gossip.NewRateLimiter(5, time.Minute), // 5 DMs/min per recipient (BUG-22)
+		dmLimiter:    gossip.NewRateLimiter(5, time.Minute),  // 5 DMs/min per recipient (BUG-22)
+		writeLimiter: gossip.NewRateLimiter(30, time.Minute), // 30 writes/min per agent (matches gossip N6)
 	}
 
 	mux := http.NewServeMux()

@@ -318,6 +318,15 @@ func (c *Connector) replayArchive(raw *store.RawEntry, isArchive bool) {
 		return
 	}
 
+	// Verify author is a channel admin (#3, #4 — gossip authority check)
+	authorHex := fmt.Sprintf("%x", raw.AuthorKey)
+	if !ch.Admins[authorHex] {
+		c.log.Warn("ignoring unauthorized channel archive/unarchive", map[string]any{
+			"author": authorHex[:16],
+		})
+		return
+	}
+
 	ch.Archived = isArchive
 }
 

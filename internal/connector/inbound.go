@@ -185,6 +185,33 @@ func (c *Connector) backfillFTSIndex() {
 		c.logDB.IndexMessageForSearch(hashHex, string(msg.Content), authorName, channelName, channelIDHex, raw.CreatedAt)
 		indexed++
 	}
+	// Also backfill thread messages (#10)
+	threadEntries, err := c.logDB.EntriesByType(int(moltcbor.EntryTypeThreadMessage))
+	if err == nil {
+		for _, raw := range threadEntries {
+			payload := decodePayload(raw)
+			if payload == nil {
+				continue
+			}
+			var msg moltcbor.ThreadMessage
+			if err := moltcbor.Unmarshal(payload, &msg); err != nil {
+				continue
+			}
+			hashHex := fmt.Sprintf("%x", raw.Hash)
+			authorName := ""
+			if agent := c.registry.GetByPublicKey(raw.AuthorKey); agent != nil {
+				authorName = agent.DisplayName
+			}
+			channelName := ""
+			if ch := c.channels.Get(msg.ChannelID); ch != nil {
+				channelName = ch.Name
+			}
+			channelIDHex := fmt.Sprintf("%x", msg.ChannelID)
+			c.logDB.IndexMessageForSearch(hashHex, string(msg.Content), authorName, channelName, channelIDHex, raw.CreatedAt)
+			indexed++
+		}
+	}
+
 	if indexed > 0 {
 		c.log.Info("backfilled FTS index", map[string]any{"count": indexed})
 	}
@@ -305,6 +332,11 @@ func (c *Connector) channelPins() map[string]map[string]bool {
 				continue
 			}
 			chHex := fmt.Sprintf("%x", pin.ChannelID)
+			// Verify author is channel admin (#3 — gossip authority check)
+			ch := c.channels.Get(pin.ChannelID)
+			if ch != nil && !ch.Admins[fmt.Sprintf("%x", raw.AuthorKey)] {
+				continue
+			}
 			msgHex := fmt.Sprintf("%x", pin.MessageHash)
 			if pins[chHex] == nil {
 				pins[chHex] = make(map[string]bool)
@@ -326,6 +358,11 @@ func (c *Connector) channelPins() map[string]map[string]bool {
 				continue
 			}
 			chHex := fmt.Sprintf("%x", pin.ChannelID)
+			// Verify author is channel admin (#4 — gossip authority check)
+			ch := c.channels.Get(pin.ChannelID)
+			if ch != nil && !ch.Admins[fmt.Sprintf("%x", raw.AuthorKey)] {
+				continue
+			}
 			msgHex := fmt.Sprintf("%x", pin.MessageHash)
 			if pins[chHex] != nil {
 				delete(pins[chHex], msgHex)
@@ -1007,7 +1044,7 @@ func (c *Connector) decodeThreadEntry(raw *store.RawEntry, filterChannelID []byt
 	// Decrypt thread content same as regular messages
 	content := c.decryptMessageContent(msg.ChannelID, msg.Content, ch, raw.AuthorKey)
 
-	return &DecodedMessage{
+	decoded := &DecodedMessage{
 		Hash:         hex.EncodeToString(raw.Hash),
 		ChannelID:    hex.EncodeToString(msg.ChannelID),
 		ChannelName:  channelName,
@@ -1019,6 +1056,13 @@ func (c *Connector) decodeThreadEntry(raw *store.RawEntry, filterChannelID []byt
 		ParentHash:   hex.EncodeToString(msg.ParentHash),
 		ActivityType: "thread",
 	}
+
+	// Index thread content for full-text search (#10)
+	if content != "" {
+		c.logDB.IndexMessageForSearch(decoded.Hash, content, authorName, channelName, decoded.ChannelID, raw.CreatedAt)
+	}
+
+	return decoded
 }
 
 // decodeSealedEntry attempts to decrypt a sealed entry by trying all available keys.
