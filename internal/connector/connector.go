@@ -80,6 +80,7 @@ type Connector struct {
 	rendezvousError string // last error from rendezvous channel join, empty if healthy
 
 	// Cached trust boundary (immutable after bootstrap)
+	cachedTBMu       sync.RWMutex
 	cachedTBPlatform string
 	cachedTBDomain   string
 	cachedTBKey      []byte // bootstrap agent's public key
@@ -660,6 +661,19 @@ func (c *Connector) DistributePSKTo(targetPubKey []byte) error {
 
 // GetTrustBoundary reads the trust boundary from the log (cached after first call).
 func (c *Connector) GetTrustBoundary() (platform, domain string, err error) {
+	c.cachedTBMu.RLock()
+	if c.cachedTBLoaded {
+		p, d := c.cachedTBPlatform, c.cachedTBDomain
+		c.cachedTBMu.RUnlock()
+		if d == "" {
+			return "", "", fmt.Errorf("no trust boundary set")
+		}
+		return p, d, nil
+	}
+	c.cachedTBMu.RUnlock()
+	c.cachedTBMu.Lock()
+	defer c.cachedTBMu.Unlock()
+	// Double-check after acquiring write lock
 	if c.cachedTBLoaded {
 		if c.cachedTBDomain == "" {
 			return "", "", fmt.Errorf("no trust boundary set")

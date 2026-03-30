@@ -1130,6 +1130,17 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Verify channel membership
+	chIDBytes, err := hex.DecodeString(channelID)
+	if err == nil {
+		ch := s.conn.Channels().Get(chIDBytes)
+		if ch != nil && !ch.IsMember(s.conn.KeyPair().Public) {
+			writeError(w, r, merrors.New("message.get.not_member", merrors.Fatal,
+				"You are not a member of this channel.", nil), 403)
+			return
+		}
+	}
+
 	messages, err := s.conn.GetMessages(channelID, since, limit)
 	if err != nil {
 		writeError(w, r, err, 500)
@@ -1825,6 +1836,17 @@ func (s *Server) handleSendThreadReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Verify channel membership
+	ch := s.conn.Channels().Get(channelID)
+	if ch == nil {
+		writeError(w, r, fmt.Errorf("channel not found"), 404)
+		return
+	}
+	if !ch.IsMember(s.conn.KeyPair().Public) {
+		writeError(w, r, fmt.Errorf("not a member of this channel"), 403)
+		return
+	}
+
 	if req.Content == "" {
 		writeError(w, r, fmt.Errorf("content required"), 400)
 		return
@@ -2489,7 +2511,7 @@ func (s *Server) handleQuorumSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sign BLAKE3(target_key || reason || created_at)
+	// Sign(target_key || reason) — binds the signature to the specific revocation target
 	targetKeyBytes, _ := hex.DecodeString(targetKey)
 	signData := append(targetKeyBytes, byte(reason))
 	kp := s.conn.KeyPair()
