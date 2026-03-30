@@ -1014,6 +1014,7 @@ func (s *Server) handleSendDM(w http.ResponseWriter, r *http.Request) {
 	// Per-recipient DM rate limit to prevent spam loops (BUG-22)
 	// Check both in-memory (fast path) and persisted (survives restarts)
 	if !s.dmLimiter.Allow(req.RecipientKey) || !s.conn.KeyDB().CheckDMRate(req.RecipientKey, 5) {
+		w.Header().Set("Retry-After", "12")
 		writeError(w, r, merrors.New("dm.send.rate_limited", merrors.Fatal,
 			"Too many DMs to this recipient. Try again later.", nil), 429)
 		return
@@ -1024,6 +1025,21 @@ func (s *Server) handleSendDM(w http.ResponseWriter, r *http.Request) {
 
 	// Check if DM channel already exists before creating
 	existingDM := channel.GetDM(s.conn.Channels(), kp.Public, recipientKeyBytes)
+
+	// DM reply cooldown: 60s between DMs to the same recipient in existing channels.
+	// Prevents agent-to-agent reply loops. Only applies to existing DM channels
+	// (new conversations are not throttled).
+	if existingDM != nil {
+		s.dmCooldownMu.Lock()
+		lastSent, hasCooldown := s.dmLastSent[req.RecipientKey]
+		s.dmCooldownMu.Unlock()
+		if hasCooldown && time.Since(lastSent) < 60*time.Second {
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", 60-int(time.Since(lastSent).Seconds())))
+			writeError(w, r, merrors.New("dm.send.cooldown", merrors.Transient,
+				"DM reply cooldown — wait 60 seconds between replies to the same recipient.", nil), 429)
+			return
+		}
+	}
 
 	// Get or create the DM channel
 	dm, err := channel.GetOrCreateDM(s.conn.Channels(), kp.Public, recipientKeyBytes)
@@ -1066,6 +1082,11 @@ func (s *Server) handleSendDM(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("Failed to send DM: %s", err.Error()), nil), 500)
 		return
 	}
+
+	// Record DM send time for cooldown tracking
+	s.dmCooldownMu.Lock()
+	s.dmLastSent[req.RecipientKey] = time.Now()
+	s.dmCooldownMu.Unlock()
 
 	writeSuccess(w, r, map[string]any{
 		"status":     "sent",
