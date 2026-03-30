@@ -40,6 +40,11 @@ func CreateDM(mgr *Manager, agent1, agent2 ed25519.PublicKey) (*Channel, error) 
 }
 
 // GetOrCreateDM returns the DM between two agents, creating it if needed.
+// GetDM returns an existing DM channel between two agents, or nil if none exists.
+func GetDM(mgr *Manager, agent1, agent2 ed25519.PublicKey) *Channel {
+	return mgr.Get(dmID(agent1, agent2))
+}
+
 func GetOrCreateDM(mgr *Manager, agent1, agent2 ed25519.PublicKey) (*Channel, error) {
 	id := dmID(agent1, agent2)
 	ch := mgr.Get(id)

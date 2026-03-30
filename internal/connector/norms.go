@@ -84,6 +84,12 @@ func (c *Connector) replayNormsUpdates() {
 			continue
 		}
 
+		// Validate content size and required fields on replay (same as publish path)
+		if err := moltcbor.ValidateNormsUpdate(&nu); err != nil {
+			c.log.Warn("skipping invalid norms entry on replay", map[string]any{"error": err.Error()})
+			continue
+		}
+
 		c.normsState.SetWorkspaceNorms(&WorkspaceNorms{
 			Content:   string(nu.Content),
 			Version:   nu.Version,
@@ -127,6 +133,11 @@ func (c *Connector) CanPublishNorms() error {
 func (c *Connector) PublishNormsUpdate(content string, version uint32) error {
 	if err := c.CanPublishNorms(); err != nil {
 		return err
+	}
+
+	// Enforce version monotonicity — new version must be higher than current
+	if wn := c.normsState.GetWorkspaceNorms(); wn != nil && version <= wn.Version {
+		return fmt.Errorf("norms version %d must be greater than current version %d", version, wn.Version)
 	}
 
 	nu := moltcbor.NormsUpdate{

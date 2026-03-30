@@ -987,6 +987,9 @@ func (s *Server) handleSendDM(w http.ResponseWriter, r *http.Request) {
 
 	kp := s.conn.KeyPair()
 
+	// Check if DM channel already exists before creating
+	existingDM := channel.GetDM(s.conn.Channels(), kp.Public, recipientKeyBytes)
+
 	// Get or create the DM channel
 	dm, err := channel.GetOrCreateDM(s.conn.Channels(), kp.Public, recipientKeyBytes)
 	if err != nil {
@@ -999,28 +1002,28 @@ func (s *Server) handleSendDM(w http.ResponseWriter, r *http.Request) {
 	// (needed to encrypt the DM message).
 	s.conn.EstablishPairwiseSecrets()
 
-	// Publish channel creation to DAG so it syncs to the peer.
-	// Include both members so the recipient's replay adds them to the channel.
-	// Resolve recipient display name for a human-readable channel name (BUG-4).
-	dmName := fmt.Sprintf("dm-%s", req.RecipientKey[:8])
-	if recipient := s.conn.Registry().GetByPublicKey(recipientKeyBytes); recipient != nil && recipient.DisplayName != "" {
-		dmName = fmt.Sprintf("dm-%s", recipient.DisplayName)
+	// Only publish ChannelCreate for new DM channels — skip for existing ones
+	// to avoid duplicate entries in the DAG (DM dedup fix)
+	if existingDM == nil {
+		dmName := fmt.Sprintf("dm-%s", req.RecipientKey[:8])
+		if recipient := s.conn.Registry().GetByPublicKey(recipientKeyBytes); recipient != nil && recipient.DisplayName != "" {
+			dmName = fmt.Sprintf("dm-%s", recipient.DisplayName)
+		}
+		chCreate := moltcbor.ChannelCreate{
+			ChannelID:   dm.ID,
+			Name:        dmName,
+			Description: "",
+			ChannelType: dm.Type,
+			Members:     [][]byte{kp.Public, recipientKeyBytes},
+		}
+		payload, err := moltcbor.Marshal(chCreate)
+		if err != nil {
+			writeError(w, r, merrors.New("dm.send.marshal_failed", merrors.Fatal,
+				"Failed to prepare DM channel.", nil), 500)
+			return
+		}
+		s.conn.PublishEntry(moltcbor.EntryTypeChannelCreate, payload)
 	}
-	chCreate := moltcbor.ChannelCreate{
-		ChannelID:   dm.ID,
-		Name:        dmName,
-		Description: "",
-		ChannelType: dm.Type,
-		Members:     [][]byte{kp.Public, recipientKeyBytes},
-	}
-	payload, err := moltcbor.Marshal(chCreate)
-	if err != nil {
-		writeError(w, r, merrors.New("dm.send.marshal_failed", merrors.Fatal,
-			"Failed to prepare DM channel.", nil), 500)
-		return
-	}
-	// Publish channel create (idempotent — DAG deduplicates by hash)
-	s.conn.PublishEntry(moltcbor.EntryTypeChannelCreate, payload)
 
 	// Send the message
 	if err := s.conn.SendMessage(dm.ID, []byte(req.Content), 0, "", "", "", ""); err != nil {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -530,11 +531,20 @@ func (s *LogDB) UpdateMessageSearchContent(hashHex, newContent string) error {
 	return err
 }
 
+// sanitizeFTSQuery escapes FTS5 special characters to prevent query syntax errors.
+// Wraps each token in double quotes so operators like AND, OR, NOT, *, NEAR are treated as literals.
+func sanitizeFTSQuery(query string) string {
+	// Replace double quotes with spaces (can't nest quotes in FTS5)
+	cleaned := strings.ReplaceAll(query, "\"", " ")
+	// Wrap the entire query in quotes to treat as a phrase/literal
+	return "\"" + cleaned + "\""
+}
+
 // SearchFTS performs a full-text search across all indexed messages.
 func (s *LogDB) SearchFTS(query string, limit int) ([]FTSResult, error) {
 	rows, err := s.db.Query(
 		"SELECT hash_hex, content, author, channel, channel_id, timestamp FROM message_fts WHERE message_fts MATCH ? ORDER BY timestamp DESC LIMIT ?",
-		query, limit,
+		sanitizeFTSQuery(query), limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("fts search: %w", err)
