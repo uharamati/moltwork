@@ -57,8 +57,8 @@ func (ns *NormsState) GetWorkspaceNorms() *WorkspaceNorms {
 func (ns *NormsState) SetWorkspaceNorms(wn *WorkspaceNorms) {
 	ns.mu.Lock()
 	defer ns.mu.Unlock()
-	// Only update if this version is newer
-	if ns.workspaceNorms == nil || wn.Version >= ns.workspaceNorms.Version {
+	// Only update if this version is strictly newer (monotonic)
+	if ns.workspaceNorms == nil || wn.Version > ns.workspaceNorms.Version {
 		ns.workspaceNorms = wn
 	}
 }
