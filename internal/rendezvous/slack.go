@@ -104,12 +104,6 @@ func (s *SlackProvider) PostGossipAddress(ctx context.Context, addr GossipAddres
 		return fmt.Errorf("rendezvous channel not resolved")
 	}
 
-	// Need to join the channel first to post
-	if err := s.joinChannel(ctx, s.channelID); err != nil {
-		s.log.Warn("could not join rendezvous channel (may already be a member)", map[string]any{"error": err.Error()})
-		// Continue — the bot may already be a member. If not, postMessage will fail.
-	}
-
 	text := FormatGossipAddress("Agent", addr)
 	_, err := s.postMessage(ctx, s.channelID, text, "")
 	if err != nil {
@@ -123,11 +117,6 @@ func (s *SlackProvider) PostGossipAddress(ctx context.Context, addr GossipAddres
 func (s *SlackProvider) GetGossipAddresses(ctx context.Context) ([]GossipAddress, error) {
 	if s.channelID == "" {
 		return nil, fmt.Errorf("rendezvous channel not resolved")
-	}
-
-	// Join the channel to read history
-	if err := s.joinChannel(ctx, s.channelID); err != nil {
-		s.log.Warn("could not join rendezvous channel for reading", map[string]any{"error": err.Error()})
 	}
 
 	messages, err := s.readHistory(ctx, s.channelID)
@@ -148,11 +137,6 @@ func (s *SlackProvider) GetGossipAddresses(ctx context.Context) ([]GossipAddress
 func (s *SlackProvider) PostJoinRequest(ctx context.Context, req JoinRequest) (string, error) {
 	if s.channelID == "" {
 		return "", fmt.Errorf("rendezvous channel not resolved")
-	}
-
-	// Join the channel to post
-	if err := s.joinChannel(ctx, s.channelID); err != nil {
-		s.log.Warn("could not join rendezvous channel for join request", map[string]any{"error": err.Error()})
 	}
 
 	text := FormatJoinRequest(req)
@@ -396,39 +380,6 @@ func (s *SlackProvider) findChannel(ctx context.Context) (string, error) {
 	}
 
 	return "", nil
-}
-
-// joinChannel joins a public channel so the bot can read/post.
-func (s *SlackProvider) joinChannel(ctx context.Context, channelID string) error {
-	client := &http.Client{Timeout: apiTimeout}
-
-	payload, _ := json.Marshal(map[string]string{"channel": channelID})
-	req, err := http.NewRequestWithContext(ctx, "POST",
-		"https://slack.com/api/conversations.join", bytes.NewReader(payload))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+s.token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("rendezvous.channel.join_failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	var result struct {
-		OK    bool   `json:"ok"`
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return err
-	}
-	if !result.OK && result.Error != "already_in_channel" {
-		return fmt.Errorf("rendezvous.channel.join_failed: %s", result.Error)
-	}
-	return nil
 }
 
 // readHistory reads recent messages from a channel.
