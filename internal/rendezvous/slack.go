@@ -14,7 +14,7 @@ import (
 
 const (
 	channelName    = "moltwork-agents"
-	pollInterval   = 5 * time.Second
+	pollInterval   = 15 * time.Second
 	apiTimeout     = 10 * time.Second
 	claimWaitTime  = 30 * time.Second
 )
@@ -192,6 +192,7 @@ func (s *SlackProvider) WatchForJoinRequests(ctx context.Context) (<-chan JoinRe
 		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
 		pruneCounter := 0
+		consecutiveErrors := 0
 
 		for {
 			select {
@@ -200,8 +201,18 @@ func (s *SlackProvider) WatchForJoinRequests(ctx context.Context) (<-chan JoinRe
 			case <-ticker.C:
 				messages, err := s.readHistory(ctx, s.channelID)
 				if err != nil {
-					s.log.Warn("poll for join requests failed", map[string]any{"error": err.Error()})
+					consecutiveErrors++
+					backoff := time.Duration(1<<min(consecutiveErrors, 6)) * pollInterval // 15s, 30s, 60s... cap ~16min
+					s.log.Warn("poll for join requests failed", map[string]any{
+						"error":   err.Error(),
+						"backoff": backoff.String(),
+					})
+					ticker.Reset(backoff)
 					continue
+				}
+				if consecutiveErrors > 0 {
+					consecutiveErrors = 0
+					ticker.Reset(pollInterval) // restore normal interval
 				}
 
 				// Build set of currently visible message TSs
@@ -382,36 +393,53 @@ func (s *SlackProvider) findChannel(ctx context.Context) (string, error) {
 	return "", nil
 }
 
-// readHistory reads recent messages from a channel.
+// readHistory reads all messages from a channel, paginating through has_more.
 func (s *SlackProvider) readHistory(ctx context.Context, channelID string) ([]slackMessage, error) {
 	client := &http.Client{Timeout: apiTimeout}
+	var allMessages []slackMessage
+	cursor := ""
 
-	req, err := http.NewRequestWithContext(ctx, "GET",
-		fmt.Sprintf("https://slack.com/api/conversations.history?channel=%s&limit=200", channelID), nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+s.token)
+	for {
+		url := fmt.Sprintf("https://slack.com/api/conversations.history?channel=%s&limit=200", channelID)
+		if cursor != "" {
+			url += "&cursor=" + cursor
+		}
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+s.token)
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("rendezvous.history.read_failed: %w", err)
-	}
-	defer resp.Body.Close()
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("rendezvous.history.read_failed: %w", err)
+		}
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	var result struct {
-		OK       bool           `json:"ok"`
-		Error    string         `json:"error"`
-		Messages []slackMessage `json:"messages"`
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+
+		var result struct {
+			OK               bool           `json:"ok"`
+			Error            string         `json:"error"`
+			Messages         []slackMessage `json:"messages"`
+			HasMore          bool           `json:"has_more"`
+			ResponseMetadata struct {
+				NextCursor string `json:"next_cursor"`
+			} `json:"response_metadata"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			return nil, err
+		}
+		if !result.OK {
+			return nil, fmt.Errorf("rendezvous.history.read_failed: %s", result.Error)
+		}
+		allMessages = append(allMessages, result.Messages...)
+		if !result.HasMore || result.ResponseMetadata.NextCursor == "" {
+			break
+		}
+		cursor = result.ResponseMetadata.NextCursor
 	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, err
-	}
-	if !result.OK {
-		return nil, fmt.Errorf("rendezvous.history.read_failed: %s", result.Error)
-	}
-	return result.Messages, nil
+	return allMessages, nil
 }
 
 // readReplies reads threaded replies to a message.

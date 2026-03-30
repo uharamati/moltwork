@@ -108,12 +108,11 @@ func (c *Connector) replayNormsUpdates() {
 // Authority: bootstrap agent (author of the trust boundary entry) or
 // anyone above them in the org hierarchy.
 func (c *Connector) CanPublishNorms() error {
-	// Get the bootstrap agent's key from the trust boundary entry
-	entries, err := c.logDB.EntriesByType(int(moltcbor.EntryTypeTrustBoundary))
-	if err != nil || len(entries) == 0 {
+	// Get the bootstrap agent's key (cached after first call)
+	bootstrapKey := c.BootstrapKey()
+	if bootstrapKey == nil {
 		return fmt.Errorf("workspace not bootstrapped — cannot publish norms")
 	}
-	bootstrapKey := entries[0].AuthorKey
 
 	localKey := c.KeyPair().Public
 	// Local agent IS the bootstrap agent

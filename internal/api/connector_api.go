@@ -774,6 +774,19 @@ func (s *Server) handleReaction(w http.ResponseWriter, r *http.Request, remove b
 		return
 	}
 
+	// Verify channel membership
+	ch := s.conn.Channels().Get(channelID)
+	if ch == nil {
+		writeError(w, r, merrors.New("message.react.channel_not_found", merrors.Fatal,
+			"Channel not found.", nil), 404)
+		return
+	}
+	if !ch.IsMember(s.conn.KeyPair().Public) {
+		writeError(w, r, merrors.New("message.react.not_member", merrors.Fatal,
+			"You are not a member of this channel.", nil), 403)
+		return
+	}
+
 	// Verify the message exists
 	entry, err := s.conn.LogDB().GetEntry(msgHash)
 	if err != nil || entry == nil {
@@ -926,10 +939,23 @@ func (s *Server) handleGetChannelPins(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify the channel ID is valid hex
-	if _, err := hex.DecodeString(channelIDHex); err != nil {
+	channelID, err := hex.DecodeString(channelIDHex)
+	if err != nil {
 		writeError(w, r, merrors.New("channel.pins.invalid_id", merrors.Fatal,
 			"Invalid channel ID format.", nil), 400)
+		return
+	}
+
+	// Verify channel membership
+	ch := s.conn.Channels().Get(channelID)
+	if ch == nil {
+		writeError(w, r, merrors.New("channel.pins.not_found", merrors.Fatal,
+			"Channel not found.", nil), 404)
+		return
+	}
+	if !ch.IsMember(s.conn.KeyPair().Public) {
+		writeError(w, r, merrors.New("channel.pins.not_member", merrors.Fatal,
+			"You are not a member of this channel.", nil), 403)
 		return
 	}
 
@@ -1832,18 +1858,11 @@ func (s *Server) handleDeclareCapabilities(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	kp := s.conn.KeyPair()
-	tips := s.conn.DAG().Tips()
-	entry, err := dag.NewSignedEntry(moltcbor.EntryTypeCapabilityDecl, payload, kp, tips)
-	if err != nil {
-		writeError(w, r, merrors.New("capabilities.declare.entry_failed", merrors.Fatal,
-			"Could not create capability declaration entry.", nil), 500)
+	if err := s.conn.PublishEntry(moltcbor.EntryTypeCapabilityDecl, payload); err != nil {
+		writeError(w, r, merrors.New("capabilities.declare.publish_failed", merrors.Fatal,
+			"Could not publish capability declaration.", nil), 500)
 		return
 	}
-
-	s.conn.DAG().Insert(entry)
-	s.conn.LogDB().InsertEntry(entry.Hash[:], entry.RawCBOR, entry.AuthorKey, entry.Signature,
-		int(moltcbor.EntryTypeCapabilityDecl), entry.CreatedAt, hashesToSlices(entry.Parents))
 
 	writeSuccess(w, r, map[string]any{
 		"status":       "declared",
@@ -1967,12 +1986,15 @@ func (s *Server) handleManagerRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payload, _ := moltcbor.Marshal(rev)
-	tips := s.conn.DAG().Tips()
-	entry, _ := dag.NewSignedEntry(moltcbor.EntryTypeRevocation, payload, s.conn.KeyPair(), tips)
-	s.conn.DAG().Insert(entry)
-	s.conn.LogDB().InsertEntry(entry.Hash[:], entry.RawCBOR, entry.AuthorKey, entry.Signature,
-		int(moltcbor.EntryTypeRevocation), entry.CreatedAt, hashesToSlices(entry.Parents))
+	payload, err := moltcbor.Marshal(rev)
+	if err != nil {
+		writeError(w, r, fmt.Errorf("marshal revocation: %w", err), 500)
+		return
+	}
+	if err := s.conn.PublishEntry(moltcbor.EntryTypeRevocation, payload); err != nil {
+		writeError(w, r, fmt.Errorf("publish revocation: %w", err), 500)
+		return
+	}
 
 	s.conn.ProcessRevocation(targetKey, rev.Timestamp)
 
@@ -2039,12 +2061,15 @@ func (s *Server) handleQuorumRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payload, _ := moltcbor.Marshal(rev)
-	tips := s.conn.DAG().Tips()
-	entry, _ := dag.NewSignedEntry(moltcbor.EntryTypeRevocation, payload, s.conn.KeyPair(), tips)
-	s.conn.DAG().Insert(entry)
-	s.conn.LogDB().InsertEntry(entry.Hash[:], entry.RawCBOR, entry.AuthorKey, entry.Signature,
-		int(moltcbor.EntryTypeRevocation), entry.CreatedAt, hashesToSlices(entry.Parents))
+	payload, err := moltcbor.Marshal(rev)
+	if err != nil {
+		writeError(w, r, fmt.Errorf("marshal revocation: %w", err), 500)
+		return
+	}
+	if err := s.conn.PublishEntry(moltcbor.EntryTypeRevocation, payload); err != nil {
+		writeError(w, r, fmt.Errorf("publish revocation: %w", err), 500)
+		return
+	}
 
 	// Find the actual pub key from hash
 	agent := s.conn.FindAgentByKeyHash(revokedKeyHash)
@@ -2255,6 +2280,17 @@ func (s *Server) handleMarkRead(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, merrors.New("read.mark.missing_fields", merrors.Fatal,
 			"Channel ID, message hash, and timestamp are required.", nil), 400)
 		return
+	}
+
+	// Verify channel membership
+	chIDBytes, err := hex.DecodeString(req.ChannelID)
+	if err == nil {
+		ch := s.conn.Channels().Get(chIDBytes)
+		if ch != nil && !ch.IsMember(s.conn.KeyPair().Public) {
+			writeError(w, r, merrors.New("read.mark.not_member", merrors.Fatal,
+				"You are not a member of this channel.", nil), 403)
+			return
+		}
 	}
 
 	if err := s.conn.KeyDB().SetReadReceipt(req.ChannelID, req.MessageHash, req.Timestamp); err != nil {

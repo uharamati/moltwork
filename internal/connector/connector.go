@@ -79,6 +79,12 @@ type Connector struct {
 	// Rendezvous health tracking
 	rendezvousError string // last error from rendezvous channel join, empty if healthy
 
+	// Cached trust boundary (immutable after bootstrap)
+	cachedTBPlatform string
+	cachedTBDomain   string
+	cachedTBKey      []byte // bootstrap agent's public key
+	cachedTBLoaded   bool
+
 	// Integrity check cache — per-instance instead of package-level (M9)
 	logDBIntegrityResult string
 	logDBIntegrityTime   time.Time
@@ -652,8 +658,14 @@ func (c *Connector) DistributePSKTo(targetPubKey []byte) error {
 		int(moltcbor.EntryTypePSKDistribution), entry.CreatedAt, hashesToSlices(entry.Parents))
 }
 
-// GetTrustBoundary reads the trust boundary from the log.
+// GetTrustBoundary reads the trust boundary from the log (cached after first call).
 func (c *Connector) GetTrustBoundary() (platform, domain string, err error) {
+	if c.cachedTBLoaded {
+		if c.cachedTBDomain == "" {
+			return "", "", fmt.Errorf("no trust boundary set")
+		}
+		return c.cachedTBPlatform, c.cachedTBDomain, nil
+	}
 	entries, err := c.logDB.EntriesByType(int(moltcbor.EntryTypeTrustBoundary))
 	if err != nil {
 		return "", "", err
@@ -683,7 +695,20 @@ func (c *Connector) GetTrustBoundary() (platform, domain string, err error) {
 		return "", "", err
 	}
 
+	c.cachedTBPlatform = tb.Platform
+	c.cachedTBDomain = tb.WorkspaceDomain
+	c.cachedTBKey = raw.AuthorKey
+	c.cachedTBLoaded = true
+
 	return tb.Platform, tb.WorkspaceDomain, nil
+}
+
+// BootstrapKey returns the cached bootstrap agent public key.
+func (c *Connector) BootstrapKey() []byte {
+	if !c.cachedTBLoaded {
+		c.GetTrustBoundary() // populate cache
+	}
+	return c.cachedTBKey
 }
 
 // startJoinRequestWatcher launches a background goroutine that watches the
