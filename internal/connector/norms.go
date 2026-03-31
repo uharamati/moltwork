@@ -90,6 +90,17 @@ func (c *Connector) replayNormsUpdates() {
 			continue
 		}
 
+		// Verify author has norms publishing authority (bootstrap agent or manager)
+		bootstrapKey := c.BootstrapKey()
+		if bootstrapKey != nil && !crypto.ConstantTimeEqual(raw.AuthorKey, bootstrapKey) {
+			if c.orgMap == nil || !c.orgMap.IsManager(raw.AuthorKey, bootstrapKey) {
+				c.log.Warn("skipping norms from unauthorized author on replay", map[string]any{
+					"author": fmt.Sprintf("%x", raw.AuthorKey[:8]),
+				})
+				continue
+			}
+		}
+
 		c.normsState.SetWorkspaceNorms(&WorkspaceNorms{
 			Content:   string(nu.Content),
 			Version:   nu.Version,

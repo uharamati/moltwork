@@ -1083,9 +1083,16 @@ func (s *Server) handleSendDM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Record DM send time for cooldown tracking
+	// Record DM send time for cooldown tracking + evict stale entries
 	s.dmCooldownMu.Lock()
 	s.dmLastSent[req.RecipientKey] = time.Now()
+	if len(s.dmLastSent) > 100 {
+		for k, t := range s.dmLastSent {
+			if time.Since(t) > 60*time.Second {
+				delete(s.dmLastSent, k)
+			}
+		}
+	}
 	s.dmCooldownMu.Unlock()
 
 	writeSuccess(w, r, map[string]any{
@@ -1370,6 +1377,8 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 			"Invalid request body.", nil), 400)
 		return
 	}
+	req.Name = sanitizeText(req.Name)
+	req.Description = sanitizeText(req.Description)
 	if req.Name == "" {
 		writeError(w, r, merrors.New("channel.create.missing_name", merrors.Fatal,
 			"Channel name is required.", nil), 400)
@@ -1847,6 +1856,7 @@ func (s *Server) handleSendThreadReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	req.Content = sanitizeText(req.Content)
 	if req.Content == "" {
 		writeError(w, r, fmt.Errorf("content required"), 400)
 		return
@@ -1866,6 +1876,16 @@ func (s *Server) handleSendThreadReply(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetThreadReplies(w http.ResponseWriter, r *http.Request) {
 	parentHashHex := r.PathValue("parent_hash")
+
+	// Verify the parent message exists and caller has access to its channel
+	parentHashBytes, err := hex.DecodeString(parentHashHex)
+	if err == nil {
+		parentEntry, err := s.conn.LogDB().GetEntry(parentHashBytes)
+		if err != nil || parentEntry == nil {
+			writeError(w, r, fmt.Errorf("parent message not found"), 404)
+			return
+		}
+	}
 
 	sinceStr := r.URL.Query().Get("since")
 	limitStr := r.URL.Query().Get("limit")
@@ -2155,6 +2175,7 @@ func readJSON(r *http.Request, v any) error {
 
 // checkWriteRate enforces the per-agent write rate limit (30/min).
 // Returns true if the request should be rejected (rate limited).
+// Each moltwork instance serves one agent, so the local agent key is the bucket key.
 func (s *Server) checkWriteRate(w http.ResponseWriter, r *http.Request) bool {
 	agentKey := fmt.Sprintf("%x", s.conn.KeyPair().Public)
 	if !s.writeLimiter.Allow(agentKey) {
@@ -2511,10 +2532,17 @@ func (s *Server) handleQuorumSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sign(target_key || reason) — binds the signature to the specific revocation target
+	// Prevent target from signing their own revocation
 	targetKeyBytes, _ := hex.DecodeString(targetKey)
-	signData := append(targetKeyBytes, byte(reason))
 	kp := s.conn.KeyPair()
+	if crypto.ConstantTimeEqual(kp.Public, targetKeyBytes) {
+		writeError(w, r, merrors.New("revoke.quorum.sign.self_revoke", merrors.Fatal,
+			"Cannot sign your own revocation.", nil), 403)
+		return
+	}
+
+	// Sign(target_key || reason) — binds the signature to the specific revocation target
+	signData := append(targetKeyBytes, byte(reason))
 	sig := crypto.Sign(kp.Private, signData)
 
 	signerKeyHex := fmt.Sprintf("%x", kp.Public)
