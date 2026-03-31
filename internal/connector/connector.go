@@ -77,7 +77,8 @@ type Connector struct {
 	normsState NormsState
 
 	// Rendezvous health tracking
-	rendezvousError string // last error from rendezvous channel join, empty if healthy
+	rendezvousErrorMu sync.RWMutex
+	rendezvousError   string // last error from rendezvous channel join, empty if healthy
 
 	// Cached trust boundary (immutable after bootstrap)
 	cachedTBMu       sync.RWMutex
@@ -476,6 +477,8 @@ func (c *Connector) KeyPair() *crypto.SigningKeyPair {
 
 // RendezvousError returns the last rendezvous channel error, or "" if healthy.
 func (c *Connector) RendezvousError() string {
+	c.rendezvousErrorMu.RLock()
+	defer c.rendezvousErrorMu.RUnlock()
 	return c.rendezvousError
 }
 
@@ -746,11 +749,15 @@ func (c *Connector) startJoinRequestWatcher() {
 	// Check if the channel exists before starting the watcher
 	exists, err := rv.WorkspaceExists(c.ctx)
 	if err != nil || !exists {
+		c.rendezvousErrorMu.Lock()
 		c.rendezvousError = "rendezvous channel not found — ensure #moltwork-agents exists and the bot is a member"
+		c.rendezvousErrorMu.Unlock()
 		c.log.Warn("rendezvous channel not found, join request watcher not started")
 		return
 	}
+	c.rendezvousErrorMu.Lock()
 	c.rendezvousError = "" // healthy
+	c.rendezvousErrorMu.Unlock()
 
 	// Cache the resolved channel ID for fast startup next time
 	if chID := rv.ChannelID(); chID != "" {

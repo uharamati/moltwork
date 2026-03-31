@@ -986,6 +986,7 @@ func (s *Server) handleSendDM(w http.ResponseWriter, r *http.Request) {
 			"Invalid request body.", nil), 400)
 		return
 	}
+	req.Content = sanitizeText(req.Content)
 	if req.RecipientKey == "" || req.Content == "" {
 		writeError(w, r, merrors.New("dm.send.missing_fields", merrors.Fatal,
 			"Recipient key and content are required.", nil), 400)
@@ -1475,6 +1476,18 @@ func (s *Server) handleJoinChannel(w http.ResponseWriter, r *http.Request) {
 	ch := s.conn.Channels().Get(channelID)
 	if ch == nil {
 		writeError(w, r, merrors.ChannelJoinNotFound(), 404)
+		return
+	}
+
+	if ch.Archived {
+		writeError(w, r, merrors.New("channel.join.archived", merrors.Fatal,
+			"Cannot join an archived channel.", nil), 400)
+		return
+	}
+
+	// Skip if already a member (idempotency — avoid duplicate DAG entries)
+	if ch.IsMember(s.conn.KeyPair().Public) {
+		writeSuccess(w, r, map[string]any{"status": "already_member", "channel": ch.Name})
 		return
 	}
 
