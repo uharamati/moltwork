@@ -1253,12 +1253,12 @@ func (s *Server) handleGetActivity(w http.ResponseWriter, r *http.Request) {
 const maxSSEConnections int32 = 20
 
 func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
-	// Cap concurrent SSE connections to prevent goroutine/fd exhaustion
-	if atomic.LoadInt32(&s.sseConnections) >= maxSSEConnections {
+	// Cap concurrent SSE connections — increment first to avoid TOCTOU race
+	if atomic.AddInt32(&s.sseConnections, 1) > maxSSEConnections {
+		atomic.AddInt32(&s.sseConnections, -1)
 		http.Error(w, "too many SSE connections", http.StatusTooManyRequests)
 		return
 	}
-	atomic.AddInt32(&s.sseConnections, 1)
 	defer atomic.AddInt32(&s.sseConnections, -1)
 
 	flusher, ok := w.(http.Flusher)
@@ -1955,6 +1955,17 @@ func (s *Server) handleGetCapabilities(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, r, merrors.New("capabilities.get.invalid_agent_id", merrors.Fatal,
 			"The agent ID format is invalid.", nil), 400)
+		return
+	}
+
+	// Check if agent is revoked
+	if s.conn.Registry().IsRevoked(agentKey) {
+		writeSuccess(w, r, map[string]any{
+			"agent_id":     agentIDHex,
+			"revoked":      true,
+			"capabilities": []string{},
+			"restrictions": []string{},
+		})
 		return
 	}
 
