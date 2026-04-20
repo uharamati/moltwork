@@ -19,6 +19,7 @@ import (
 	"moltwork/internal/health"
 	"moltwork/internal/identity"
 	"moltwork/internal/logging"
+	"moltwork/internal/rendezvous"
 	"moltwork/internal/store"
 )
 
@@ -330,7 +331,24 @@ func runBootstrap(platform, botToken string, f parsedFlags) {
 		os.Exit(1)
 	}
 
-	// Step 2: Start connector and bootstrap
+	// Step 2: Refuse to bootstrap if a workspace already exists on the
+	// rendezvous (e.g. another agent already created #moltwork-agents).
+	// This prevents silent split-brain where two agents both think they
+	// are the founding bootstrap agent for the same Slack workspace.
+	rv := rendezvous.NewSlackProvider(botToken, log)
+	exists, err := rv.WorkspaceExists(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Could not check for an existing workspace on %s: %v\n", domain, err)
+		fmt.Fprintln(os.Stderr, "Refusing to bootstrap on an ambiguous rendezvous check.")
+		os.Exit(1)
+	}
+	if exists {
+		fmt.Fprintf(os.Stderr, "A Moltwork workspace already exists on %s.\n", domain)
+		fmt.Fprintln(os.Stderr, "Run 'moltwork join' to join it instead of bootstrapping.")
+		os.Exit(1)
+	}
+
+	// Step 3: Start connector and bootstrap
 	conn := connector.New(cfg)
 	if err := conn.Start(ctx); err != nil {
 		log.Fatal("start connector", map[string]any{"error": err.Error()})
@@ -341,7 +359,9 @@ func runBootstrap(platform, botToken string, f parsedFlags) {
 		log.Fatal("bootstrap", map[string]any{"error": err.Error()})
 	}
 
-	// Step 3: Store the platform token (so /api/join and the watcher can use it)
+	// Store the platform token after bootstrap (so Bootstrap's defensive
+	// re-verification skips — we already verified above) and before the
+	// announcement so AnnounceOwnJoinToSlack can use it.
 	if err := conn.KeyDB().SetPlatformToken([]byte(botToken), platform, domain); err != nil {
 		log.Fatal("store platform token", map[string]any{"error": err.Error()})
 	}

@@ -93,16 +93,11 @@ func TestEndToEnd(t *testing.T) {
 	t.Log("Step 1: Status OK")
 
 	// --- Step 2: Bootstrap workspace ---
-	body := `{"platform":"slack","workspace_domain":"test.slack.com"}`
-	resp = doPost(t, base+"/api/bootstrap", token, body)
-	bsResult := decodeEnvelope(t, resp)
-	resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		t.Fatalf("bootstrap failed: %d", resp.StatusCode)
-	}
-	if bsResult["status"] != "bootstrapped" {
-		t.Fatalf("expected bootstrapped, got %v", bsResult["status"])
+	// Use connector.Bootstrap directly instead of POST /api/bootstrap to
+	// avoid the real-Slack rendezvous check that the handler now performs.
+	// The handler itself is covered by TestHandleBootstrap* in api_test.go.
+	if err := conn.Bootstrap("slack", "test.slack.com"); err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
 	}
 	t.Log("Step 2: Bootstrap OK")
 
@@ -418,12 +413,13 @@ func TestJoinChannelAlreadyMember(t *testing.T) {
 	base := fmt.Sprintf("http://%s", srv.Addr())
 	token := srv.Token()
 
-	// Bootstrap
-	resp := doPost(t, base+"/api/bootstrap", token, `{"platform":"slack","workspace_domain":"test.slack.com"}`)
-	resp.Body.Close()
+	// Bootstrap (direct — see TestEndToEnd Step 2 for rationale)
+	if err := conn.Bootstrap("slack", "test.slack.com"); err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
 
 	// Join as agent
-	resp = doPost(t, base+"/api/join", token, `{"display_name":"Idem Agent","platform":"slack"}`)
+	resp := doPost(t, base+"/api/join", token, `{"display_name":"Idem Agent","platform":"slack"}`)
 	resp.Body.Close()
 
 	// Get channels to find a public channel
@@ -498,10 +494,11 @@ func TestSendToArchivedChannel(t *testing.T) {
 	base := fmt.Sprintf("http://%s", srv.Addr())
 	token := srv.Token()
 
-	// Bootstrap and join
-	resp := doPost(t, base+"/api/bootstrap", token, `{"platform":"slack","workspace_domain":"test.slack.com"}`)
-	resp.Body.Close()
-	resp = doPost(t, base+"/api/join", token, `{"display_name":"Archive Test Agent","platform":"slack"}`)
+	// Bootstrap and join (direct bootstrap — see TestEndToEnd Step 2 for rationale)
+	if err := conn.Bootstrap("slack", "test.slack.com"); err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+	resp := doPost(t, base+"/api/join", token, `{"display_name":"Archive Test Agent","platform":"slack"}`)
 	resp.Body.Close()
 
 	// Create a channel

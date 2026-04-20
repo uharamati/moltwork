@@ -90,8 +90,14 @@ func (s *Server) registerConnectorRoutes(mux *http.ServeMux) {
 type bootstrapRequest struct {
 	Platform        string `json:"platform"`
 	WorkspaceDomain string `json:"workspace_domain"`
+	PlatformToken   string `json:"platform_token"`
 }
 
+// handleBootstrap creates a new workspace. It refuses to bootstrap when a
+// workspace already exists on the platform rendezvous (e.g. the Slack
+// #moltwork-agents channel) to prevent silent split-brain. Callers that see
+// onboarding.bootstrap.workspace_exists should use POST /api/join/rendezvous
+// instead.
 func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	var req bootstrapRequest
 	if err := readJSON(r, &req); err != nil {
@@ -99,14 +105,48 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 			"Invalid request body.", nil), 400)
 		return
 	}
-	if req.Platform == "" || req.WorkspaceDomain == "" {
+	if req.Platform == "" || req.WorkspaceDomain == "" || req.PlatformToken == "" {
 		writeError(w, r, merrors.New("onboarding.bootstrap.missing_fields", merrors.Fatal,
-			"Platform and workspace domain are required.", nil), 400)
+			"Platform, workspace domain, and platform token are required.", nil), 400)
+		return
+	}
+
+	// Verify the platform token so we can (a) trust the workspace identity
+	// and (b) authoritatively query the rendezvous channel.
+	if _, err := s.verifyPlatformToken(r.Context(), req.Platform, req.PlatformToken); err != nil {
+		writeError(w, r, merrors.New("onboarding.bootstrap.token_invalid", merrors.Fatal,
+			"Platform token verification failed.", nil), 401)
+		return
+	}
+
+	// Refuse to bootstrap if a workspace already exists on the rendezvous.
+	// This is the guard that prevents two agents from silently becoming
+	// bootstrap agents for the same Slack workspace.
+	rv := s.newRendezvous(req.Platform, req.PlatformToken)
+	exists, err := rv.WorkspaceExists(r.Context())
+	if err != nil {
+		writeError(w, r, merrors.New("onboarding.bootstrap.rendezvous_check_failed", merrors.Fatal,
+			"Could not determine whether a workspace already exists. Refusing to bootstrap.", nil), 502)
+		return
+	}
+	if exists {
+		writeError(w, r, merrors.New("onboarding.bootstrap.workspace_exists", merrors.Fatal,
+			"A Moltwork workspace already exists on this platform. Use POST /api/join/rendezvous to join it.", nil), 409)
 		return
 	}
 
 	if err := s.conn.Bootstrap(req.Platform, req.WorkspaceDomain); err != nil {
 		writeError(w, r, err, 500)
+		return
+	}
+
+	// Store the platform token after bootstrap so the post-bootstrap
+	// announcement (AnnounceOwnJoinToSlack) and join watcher can use it.
+	// It is stored after Bootstrap (not before) to avoid triggering the
+	// defensive re-verification inside Bootstrap — we already verified
+	// the token above.
+	if err := s.conn.KeyDB().SetPlatformToken([]byte(req.PlatformToken), req.Platform, req.WorkspaceDomain); err != nil {
+		writeError(w, r, fmt.Errorf("store platform token: %w", err), 500)
 		return
 	}
 

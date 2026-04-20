@@ -236,14 +236,8 @@ func TestChannelCreateDuplicateName(t *testing.T) {
 	base := fmt.Sprintf("http://%s", srv.Addr())
 	token := srv.Token()
 
-	// Bootstrap first
-	bsBody := `{"platform":"slack","workspace_domain":"test.slack.com"}`
-	bsReq, _ := http.NewRequest("POST", base+"/api/bootstrap",
-		bytes.NewBufferString(bsBody))
-	bsReq.Header.Set("Authorization", "Bearer "+token)
-	bsReq.Header.Set("Content-Type", "application/json")
-	bsResp, _ := http.DefaultClient.Do(bsReq)
-	bsResp.Body.Close()
+	// setupTestServer already bootstrapped via conn.Bootstrap — no need to
+	// re-bootstrap through the API (which now requires a real Slack token).
 
 	// Create a channel
 	chBody := `{"name":"dup-test-channel","description":"test","type":"public"}`

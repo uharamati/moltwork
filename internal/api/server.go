@@ -16,7 +16,9 @@ import (
 	"moltwork/internal/crypto"
 	"moltwork/internal/gossip"
 	"moltwork/internal/health"
+	"moltwork/internal/identity"
 	"moltwork/internal/logging"
+	"moltwork/internal/rendezvous"
 	"moltwork/internal/store"
 )
 
@@ -51,6 +53,11 @@ type Server struct {
 	publicServer   *http.Server
 	publicListener net.Listener
 	joinStatuses   sync.Map // joinID -> *joinStatusEntry
+
+	// Test seams. Overridable so unit tests can bypass real Slack calls.
+	// Defaults are set in NewServer.
+	verifyPlatformToken func(ctx context.Context, platform, token string) (*identity.PlatformIdentity, error)
+	newRendezvous       func(platform, token string) rendezvous.Provider
 }
 
 // SetVersion sets the version string for the status endpoint.
@@ -86,6 +93,17 @@ func NewServer(conn *connector.Connector, port int) (*Server, error) {
 		dmLimiter:    gossip.NewRateLimiter(5, time.Minute),  // 5 DMs/min per recipient (BUG-22)
 		writeLimiter: gossip.NewRateLimiter(30, time.Minute), // 30 writes/min per agent (matches gossip N6)
 		dmLastSent:   make(map[string]time.Time),
+		verifyPlatformToken: func(ctx context.Context, platform, tok string) (*identity.PlatformIdentity, error) {
+			switch platform {
+			case "slack":
+				return identity.NewSlackVerifier().Verify(ctx, tok)
+			default:
+				return nil, fmt.Errorf("unsupported platform: %s", platform)
+			}
+		},
+		newRendezvous: func(platform, tok string) rendezvous.Provider {
+			return rendezvous.NewSlackProvider(tok, log)
+		},
 	}
 
 	mux := http.NewServeMux()
